@@ -85,7 +85,7 @@ result = app.invoke({
     "question": "What is this document about?",
     "generation": "",
     "documents": [],
-    "pdf_path": r"D:\Brandlovestudio\SRS_Brandlovestudio.AI.pdf"
+    "pdf_path": r"D:\Brandlovestudio\Sailatha_DS (2).pdf"
 })
 
 print(app.get_graph().draw_mermaid())

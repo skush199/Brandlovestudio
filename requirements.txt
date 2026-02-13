@@ -1,0 +1,7 @@
+dotenv
+langchain_community
+langchain_openai
+langgraph
+
+pdfplumber
+google-cloud-vision

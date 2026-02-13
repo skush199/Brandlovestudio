@@ -1,17 +1,21 @@
-# Python virtual environments
+# Virtual Environment
 venv/
 .env/
-env/
-ENV/
+
+# Environment variables file
+.env
+
+# JSON files (optional - be careful)
+*.json
 
 # Python cache
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
 
-# VS Code
-.vscode/
 
-# Mac
-.DS_Store
+# PDF files
+*.pdf
+
+# OCR output text
+ocr_extracted_text_new.txt
+
