@@ -17,5 +17,10 @@ __pycache__/
 *.pdf
 
 # OCR output text
-ocr_extracted_text_new.txt
+*.txt
+
+
+/extracted_images2
+/extracted_images
+/faiss_index
 

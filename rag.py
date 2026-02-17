@@ -83,7 +83,7 @@ def image_analyzer_node(state: GraphState) -> GraphState:
 
     pdf_path = state["pdf_path"]
     pdf_name = Path(pdf_path).stem
-    output_folder = f"extracted_images/{pdf_name}"
+    output_folder = f"extracted_images2/{pdf_name}"
 
     processor = GoogleVisionOCRProcessor()
 
@@ -373,7 +373,7 @@ from langchain_core.output_parsers import StrOutputParser
 
 
 class ChatProcessor:
-    def __init__(self, model: str = "gpt-4o"):
+    def __init__(self, model: str = "gpt-3.5-turbo"):
         self.llm = ChatOpenAI(
             model=model,
             temperature=0
@@ -384,7 +384,8 @@ class ChatProcessor:
     (
         "system",
         """
-        You are an intelligent document analysis assistant.
+        Role:
+        Your function is to generate a structured, well-organized blog strictly based on the provided context document.
 
         Instructions:
         - Use ONLY the provided context.
@@ -392,7 +393,78 @@ class ChatProcessor:
         - Do NOT introduce external knowledge.
         - Base your answer strictly on what is present in the context.
         - If there is insufficient information, clearly state that.
+        
+        Template:
+        Instructions:
+            Use ONLY the provided context.
 
+            You may analyze, synthesize, and evaluate information from the context.
+
+            Do NOT introduce external knowledge.
+
+            Base your answer strictly on what is present in the context.
+
+            If there is insufficient information, clearly state that.
+
+            You MUST strictly follow the blog template structure below:
+
+            Title
+
+            Date / Category -> date can be todays and you can figure out the category from context
+
+            Introduction
+
+            Context
+
+            Core thesis
+
+            Supporting data
+
+            Preview of sections
+
+            Section 1 (H2)
+
+            Explanation
+
+            Examples
+
+            Supporting data/table
+
+            Section 2 (H2)
+
+            Impact discussion
+
+            Subheadings (H3)
+
+            Table (optional)
+
+            Section 3 (H2)
+
+            Analytical discussion
+
+            Case example
+
+            Challenges Section (H2)
+
+            Problem
+
+            Solutions
+
+            Future Trends Section (H2)
+
+            Emerging technologies
+
+            Strategic implications
+
+            Implications Section
+
+            FAQ Section
+
+            Q&A format
+
+            Conclusion
+
+            Related Posts
         Your goal is to provide reasoned answers grounded in the document.
         """
     ),
@@ -474,8 +546,8 @@ workflow.add_edge("image_analyzer", "embeddings")
 
 workflow.add_edge("embeddings","vector_store")
 workflow.add_edge("vector_store","Retriever")
-workflow.add_edge("Retriever","chat_node")
-workflow.add_edge("chat_node", END)
+#workflow.add_edge("Retriever","chat_node")
+workflow.add_edge("Retriever", END)
 
 
 
@@ -490,7 +562,7 @@ app = workflow.compile()
 # })
 
 result = app.invoke({
-    "question": "what is the document about",
+    "question": "please generate the blog for about goals and benifits ",
     "generation": "",
     "documents": [],
     "pdf_path": r"1-Cognixia-SecOps.pdf",
