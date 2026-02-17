@@ -83,7 +83,7 @@ def image_analyzer_node(state: GraphState) -> GraphState:
 
     pdf_path = state["pdf_path"]
     pdf_name = Path(pdf_path).stem
-    output_folder = f"extracted_images2/{pdf_name}"
+    output_folder = f"extracted_images/{pdf_name}"
 
     processor = GoogleVisionOCRProcessor()
 
@@ -565,7 +565,7 @@ result = app.invoke({
     "question": "please generate the blog for about goals and benifits ",
     "generation": "",
     "documents": [],
-    "pdf_path": r"1-Cognixia-SecOps.pdf",
+    "pdf_path": r"1-Cognixia-DEVops.pdf",
     "chunks": [],
     "images": [],   
     "embeddings": [],
@@ -579,4 +579,4 @@ result = app.invoke({
 print(app.get_graph().draw_mermaid())
 
 
-
+# should work for all formats

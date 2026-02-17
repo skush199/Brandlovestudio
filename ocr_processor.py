@@ -363,16 +363,29 @@ class GoogleVisionOCRProcessor:
     # -------------------------------------------------------
     # Extract Text From PDF
     # -------------------------------------------------------
+    import os
+    import io
+    import pdfplumber
+
     def extract_text_from_pdf(
-        self,
-        pdf_path: str,
-        user_type: str = "org",
-        language_hints=None,
-        out_txt: str = "ocr_extracted_text.txt",
-        keep_page_breaks: bool = True
-    ) -> str:
+            self,
+            pdf_path: str,
+            user_type: str = "org",
+            language_hints=None,
+            output_dir: str = "extracted_images",
+            keep_page_breaks: bool = True
+        ) -> str:
 
         client = self._build_vision_client(user_type)
+
+        # ✅ Create output directory if not exists
+        os.makedirs(output_dir, exist_ok=True)
+
+        # ✅ Get PDF base name (without extension)
+        pdf_name = os.path.splitext(os.path.basename(pdf_path))[0]
+
+        # ✅ Create output txt path inside extracted_images2
+        out_txt = os.path.join(output_dir, f"{pdf_name}_ocr.txt")
 
         all_pages_text = []
 
@@ -412,9 +425,9 @@ class GoogleVisionOCRProcessor:
                     all_pages_text.append(combined)
 
         final_text = (
-            "".join(all_pages_text)
+            "\n\n".join(all_pages_text)
             if keep_page_breaks
-            else "\n\n".join(all_pages_text)
+            else "".join(all_pages_text)
         )
 
         with open(out_txt, "w", encoding="utf-8") as f:
@@ -423,3 +436,6 @@ class GoogleVisionOCRProcessor:
         print("✅ Text saved to:", out_txt)
 
         return final_text
+
+
+# should work for all formats
