@@ -378,14 +378,15 @@ class GoogleVisionOCRProcessor:
 
         client = self._build_vision_client(user_type)
 
-        # ✅ Create output directory if not exists
-        os.makedirs(output_dir, exist_ok=True)
-
-        # ✅ Get PDF base name (without extension)
+        # Get PDF base name (without extension)
         pdf_name = os.path.splitext(os.path.basename(pdf_path))[0]
 
-        # ✅ Create output txt path inside extracted_images2
+        # Make folder dynamic
+        output_dir = os.path.join(output_dir, pdf_name)
+        os.makedirs(output_dir, exist_ok=True)
+
         out_txt = os.path.join(output_dir, f"{pdf_name}_ocr.txt")
+
 
         all_pages_text = []
 
