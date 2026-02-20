@@ -6,7 +6,7 @@ langgraph
 pdfplumber
 google-cloud-vision
 
-
+openai
 
 langchain==1.2.10
 langchain-text-splitters>=0.0.11
