@@ -17,3 +17,13 @@ webcolors
 
 scikit-image
 
+python-pptx
+
+python-docx
+
+
+opencv-python
+numpy
+Pillow
+
+scikit-learn

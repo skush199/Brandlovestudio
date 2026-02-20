@@ -9,6 +9,10 @@ venv/
 *.json
 *.jpg
 
+# for .docx extensions files
+*.docx
+
+
 # Python cache
 __pycache__/
 *.pyc
@@ -22,6 +26,6 @@ __pycache__/
 
 
 /extracted_images2
-/extracted_images
+/extracted_content
 /faiss_index
 
