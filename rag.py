@@ -115,26 +115,79 @@ class GraphState(TypedDict):
     Represents the state of our graph.
 
     Attributes:
+        file_paths: list of file paths to process
+        mode: operation mode - "retrieve" or "chat"
         question: question
         generation: LLM generation
-        documents: list of documents
+        documents: list of document dicts with metadata
+        chunks: list of text_sources: source chunks
+        chunks metadata for each chunk
+        images: list of image paths
+        embeddings: list of embeddings
+        vectorstore: FAISS vectorstore
+        retrieved_docs: retrieved documents
+        file_metadata: metadata for each file
     """
 
+    file_paths: List[str]
+    mode: Literal["retrieve", "chat"]
     question: str
     generation: str
-    documents: List[str]
-    pdf_path: str
+    documents: List[Dict]
     chunks: List[str]
+    chunks_sources: List[Dict]
     images: List[str]
     embeddings: List[List[float]]
     vectorstore: object
     retrieved_docs: List[str]
+    file_metadata: List[Dict]
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+# Node0: Meta Node (extracts file metadata before OCR)
+from pathlib import Path
+from datetime import datetime
+
+
+def meta_node(state: GraphState) -> GraphState:
+    print("⚪ Running Meta Node...")
+    logger.log_workflow("meta_node")
+
+    file_paths = state["file_paths"]
+    unique_paths = list(dict.fromkeys([os.path.abspath(p) for p in file_paths]))
+    file_metadata = []
+
+    for file_path in unique_paths:
+        metadata = {}
+
+        if os.path.exists(file_path):
+            file_stats = os.stat(file_path)
+
+            metadata = {
+                "file_name": os.path.basename(file_path),
+                "file_path": os.path.abspath(file_path),
+                "file_size_bytes": file_stats.st_size,
+                "created_time": datetime.fromtimestamp(file_stats.st_ctime),
+                "modified_time": datetime.fromtimestamp(file_stats.st_mtime),
+                "is_file": os.path.isfile(file_path),
+                "is_directory": os.path.isdir(file_path),
+            }
+
+            for key, value in metadata.items():
+                print(f"{key}: {value}")
+        else:
+            print(f"File not found: {file_path}")
+
+        file_metadata.append(metadata)
+
+    # return {**state, "file_metadata": file_metadata}
+    return {**state, "file_paths": unique_paths, "file_metadata": file_metadata}
 
 
 # ----------------------------------------------------------------------------------------------------------------------
 # Node1: OCR Node
 from pathlib import Path
-from ocr_processor import GoogleVisionOCRProcessor
+from ocr_processor_copy import GoogleVisionOCRProcessor
 from docx import Document
 
 
@@ -143,91 +196,140 @@ def ocr_node(state: GraphState) -> GraphState:
     logger.log_workflow("ocr_node")
     logger.log_function_call("GoogleVisionOCRProcessor")
 
-    file_path = state["pdf_path"]  # can be .pdf OR .jpg/.png etc
-    ext = Path(file_path).suffix.lower()
-
+    file_paths = state["file_paths"]
     processor = GoogleVisionOCRProcessor()
 
-    if ext == ".pdf":
-        logger.log_api_call("Google Vision OCR", "PDF extraction")
-        extracted_text = processor.extract_text_from_pdf(
-            pdf_path=file_path, user_type="org"
-        )
-    elif ext in {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp"}:
-        logger.log_api_call("Google Vision OCR", "Image extraction")
-        extracted_text = processor.extract_text_from_image_file(
-            image_path=file_path, user_type="org"
-        )
-    elif ext == ".pptx":
-        logger.log_api_call("Google Vision OCR", "PPTX extraction")
-        result = processor.extract_text_and_images_from_pptx(
-            pptx_path=file_path, user_type="org"
-        )
+    all_documents = []
+    all_images = []
 
-        return {**state, "documents": [result["text"]], "images": result["images"]}
+    for file_path in file_paths:
+        ext = Path(file_path).suffix.lower()
+        file_name = Path(file_path).stem
 
-    elif ext == ".docx":
-        doc_name = Path(file_path).stem
-        output_dir = f"extracted_content/{doc_name}"
-        os.makedirs(output_dir, exist_ok=True)
+        print(f"📄 Processing: {file_path}")
 
-        doc = Document(file_path)
-        extracted_text = "\n".join([para.text for para in doc.paragraphs])
+        if ext == ".pdf":
+            logger.log_api_call("Google Vision OCR", f"PDF extraction: {file_name}")
+            extracted_text = processor.extract_text_from_pdf(
+                pdf_path=file_path, user_type="org"
+            )
+            all_documents.append(
+                {
+                    "file_name": file_name,
+                    "file_path": file_path,
+                    "text": extracted_text,
+                    "images": [],
+                }
+            )
 
-        out_txt = os.path.join(output_dir, f"{doc_name}_ocr.txt")
-        with open(out_txt, "w", encoding="utf-8") as f:
-            f.write(extracted_text)
-        print("✅ Text saved to:", out_txt)
+        elif ext in {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp"}:
+            logger.log_api_call("Google Vision OCR", f"Image extraction: {file_name}")
+            extracted_text = processor.extract_text_from_image_file(
+                image_path=file_path, user_type="org"
+            )
+            img_name = Path(file_path).stem
+            output_folder = f"extracted_content/{img_name}"
+            stored_img = processor.save_and_analyze_image_file(
+                image_path=file_path, output_folder=output_folder, user_type="org"
+            )
+            all_documents.append(
+                {
+                    "file_name": file_name,
+                    "file_path": file_path,
+                    "text": extracted_text,
+                    "images": [stored_img],
+                }
+            )
+            all_images.append(stored_img)
 
-    else:
-        raise ValueError(f"Unsupported file type: {ext} ({file_path})")
+        elif ext == ".pptx":
+            logger.log_api_call("Google Vision OCR", f"PPTX extraction: {file_name}")
+            result = processor.extract_text_and_images_from_pptx(
+                pptx_path=file_path, user_type="org"
+            )
+            all_documents.append(
+                {
+                    "file_name": file_name,
+                    "file_path": file_path,
+                    "text": result["text"],
+                    "images": result["images"],
+                }
+            )
+            all_images.extend(result["images"])
 
-    return {**state, "documents": [extracted_text]}
+        elif ext == ".docx":
+            doc_name = Path(file_path).stem
+            output_dir = f"extracted_content/{doc_name}"
+            os.makedirs(output_dir, exist_ok=True)
+
+            doc = Document(file_path)
+            extracted_text = "\n".join([para.text for para in doc.paragraphs])
+
+            out_txt = os.path.join(output_dir, f"{doc_name}_ocr.txt")
+            with open(out_txt, "w", encoding="utf-8") as f:
+                f.write(extracted_text)
+            print("✅ Text saved to:", out_txt)
+
+            # Extract images from docx
+            logger.log_api_call("Google Vision Image Properties", f"DOCX: {doc_name}")
+            docx_images = processor.extract_images_from_docx(
+                docx_path=file_path, output_dir=output_dir, user_type="org"
+            )
+            all_images.extend(docx_images)
+
+            all_documents.append(
+                {
+                    "file_name": file_name,
+                    "file_path": file_path,
+                    "text": extracted_text,
+                    "images": docx_images,
+                }
+            )
+
+        else:
+            raise ValueError(f"Unsupported file type: {ext} ({file_path})")
+
+    return {**state, "documents": all_documents, "images": all_images}
 
 
 from pathlib import Path
-from ocr_processor import GoogleVisionOCRProcessor
+from ocr_processor_copy import GoogleVisionOCRProcessor
 
 
 def image_analyzer_node(state: GraphState) -> GraphState:
     print("🟠 Running Image Analyzer Node...")
     logger.log_workflow("image_analyzer_node")
 
-    file_path = state["pdf_path"]
-    ext = Path(file_path).suffix.lower()
-
+    documents = state.get("documents", [])
+    file_paths = state.get("file_paths", [])
     processor = GoogleVisionOCRProcessor()
 
-    # ✅ PDF: extract images from pages
-    if ext == ".pdf":
-        pdf_name = Path(file_path).stem
-        output_folder = f"extracted_content/{pdf_name}"
-        logger.log_api_call("Google Vision Image Properties", f"PDF: {pdf_name}")
+    all_images = []
 
-        image_paths = processor.extract_images_only(
-            pdf_path=file_path, output_folder=output_folder
-        )
-        return {"images": image_paths}
+    for doc in documents:
+        doc_images = doc.get("images", [])
+        all_images.extend(doc_images)
 
-    # ✅ Image files: store + analyze
-    elif ext in {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp"}:
-        img_name = Path(file_path).stem
-        output_folder = f"extracted_content/{img_name}"
+    # Also extract images from PDFs that haven't been analyzed
+    for file_path in file_paths:
+        ext = Path(file_path).suffix.lower()
+        file_name = Path(file_path).stem
 
-        stored_img = processor.save_and_analyze_image_file(
-            image_path=file_path, output_folder=output_folder, user_type="org"
-        )
-        return {"images": [stored_img]}
-    elif ext == ".docx":
-        doc_name = Path(file_path).stem
-        output_folder = f"extracted_content/{doc_name}"
+        if ext == ".pdf":
+            output_folder = f"extracted_content/{file_name}"
 
-        image_paths = processor.extract_images_from_docx(
-            docx_path=file_path, output_dir=output_folder, user_type="org"
-        )
-        return {"images": image_paths}
-    else:
-        return {"images": []}
+            # Check if analysis already exists
+            first_page_analysis = f"{output_folder}/page_1_analysis.json"
+            if not os.path.exists(first_page_analysis):
+                logger.log_api_call(
+                    "Google Vision Image Properties", f"PDF: {file_name}"
+                )
+                image_paths = processor.extract_images_only(
+                    pdf_path=file_path, output_folder=output_folder
+                )
+                all_images.extend(image_paths)
+
+    return {"images": all_images}
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -240,14 +342,21 @@ from langchain_text_splitters import (
 
 
 class TextProcessor:
-    def preprocess_text(self, documents: List[str]) -> List[str]:
-        """Split and clean text documents into chunks"""
+    def preprocess_text(self, documents: List[Dict]) -> tuple[List[str], List[Dict]]:
+        """Split and clean text documents into chunks with source tracking"""
         processed_docs = []
+        chunks_sources = []
 
         for doc in documents:
+            file_name = doc.get("file_name", "unknown")
+            text = doc.get("text", "")
+
+            if not text:
+                continue
+
             # Clean lines and remove empty ones
             cleaned_text = "\n".join(
-                [line.strip() for line in doc.strip().split("\n") if line.strip()]
+                [line.strip() for line in text.strip().split("\n") if line.strip()]
             )
 
             # Step 1: Split based on headers
@@ -259,30 +368,39 @@ class TextProcessor:
             # Step 2: Recursively split header chunks
             for chunk in header_chunks:
                 recursive_splitter = RecursiveCharacterTextSplitter(
-                    chunk_size=400,  # 3000,600,400,300
-                    chunk_overlap=100,  # 500,100,80,60
+                    chunk_size=400,
+                    chunk_overlap=100,
                     separators=[
                         "\n\n",
                         "\n",
                         ".",
                         " ",
-                    ],  # this is new if working only need to keep it
+                    ],
                 )
-                # chunk.page_content is used because MarkdownHeaderTextSplitter returns Document objects
-                processed_docs.extend(recursive_splitter.split_text(chunk.page_content))
+                text_chunks = recursive_splitter.split_text(chunk.page_content)
+                processed_docs.extend(text_chunks)
 
-        return processed_docs
+                # Track source for each chunk
+                for i in range(len(text_chunks)):
+                    chunks_sources.append(
+                        {
+                            "file": file_name,
+                            "chunk_index": len(processed_docs) - len(text_chunks) + i,
+                        }
+                    )
+
+        return processed_docs, chunks_sources
 
 
 # Node function
-def text_splitter_node(state: dict) -> dict:
+def text_splitter_node(state: GraphState) -> GraphState:
     print("🟢 Running Text Splitter Node...")
 
     documents = state.get("documents", [])
     processor = TextProcessor()
-    chunks = processor.preprocess_text(documents)
+    chunks, chunks_sources = processor.preprocess_text(documents)
 
-    return {"chunks": chunks}
+    return {"chunks": chunks, "chunks_sources": chunks_sources}
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -325,18 +443,35 @@ def embeddings_node(state: GraphState) -> GraphState:
     logger.log_workflow("embeddings_node")
 
     chunks = state.get("chunks", [])
+    chunks_sources = state.get("chunks_sources", [])
     images = state.get("images", [])
+    file_metadata = state.get("file_metadata", [])
 
     combined_inputs = []
+    combined_sources = []
 
-    # Add text chunks
+    # Add text chunks with their sources
     if chunks:
         combined_inputs.extend(chunks)
+        combined_sources.extend(chunks_sources)
+
+    # Add file metadata (filenames) to embeddings
+    if file_metadata:
+        for meta in file_metadata:
+            file_name = meta.get("file_name", "")
+            file_ext = meta.get("file_extension", "")
+            if file_name:
+                metadata_str = (
+                    f"Filename: {file_name}{file_ext}\n"
+                )
+                combined_inputs.append(metadata_str)
+                combined_sources.append({"file": file_name, "chunk_index": -2})
 
     # Add image summaries from analysis files
     if images:
         for img in images:
             analysis_path = os.path.splitext(img)[0] + "_analysis.json"
+            img_name = Path(img).stem
 
             if os.path.exists(analysis_path):
                 with open(analysis_path, "r", encoding="utf-8") as f:
@@ -352,19 +487,12 @@ def embeddings_node(state: GraphState) -> GraphState:
                 if analysis.get("labels"):
                     labels = ", ".join(
                         [
-                            l["description"]
+                            l.get("desc", l.get("description", ""))
                             for l in analysis["labels"]
-                            if "description" in l
                         ]
                     )
                     if labels:
                         summary_parts.append(f"Labels: {labels}")
-
-                # Best guess labels
-                if analysis.get("best_guess_labels"):
-                    guess = ", ".join(analysis["best_guess_labels"])
-                    if guess:
-                        summary_parts.append(f"Best guess: {guess}")
 
                 # Dominant colors
                 if analysis.get("dominant_colors"):
@@ -382,17 +510,24 @@ def embeddings_node(state: GraphState) -> GraphState:
 
                 if image_summary:
                     combined_inputs.append(image_summary)
+                    combined_sources.append({"file": img_name, "chunk_index": -1})
             else:
-                # Only fallback if JSON truly missing
                 combined_inputs.append(f"Image reference: {img}")
+                combined_sources.append({"file": img_name, "chunk_index": -1})
 
     if not combined_inputs:
         raise ValueError("No data found to embed.")
 
+    logger.log_api_call("OpenAI Embeddings", "Generating embeddings")
     processor = EmbeddingProcessor(model="text-embedding-ada-002")
     vectors = processor.generate_embeddings(combined_inputs)
 
-    return {**state, "chunks": combined_inputs, "embeddings": vectors}
+    return {
+        **state,
+        "chunks": combined_inputs,
+        "chunks_sources": combined_sources,
+        "embeddings": vectors,
+    }
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -434,26 +569,36 @@ class VectorStoreProcessor:
 def vector_store_node(state: GraphState) -> GraphState:
     print("🟡 Running Vector Store Node...")
     logger.log_workflow("vector_store_node")
-    logger.log_function_call("FAISS.from_embeddings")
 
     chunks = state.get("chunks", [])
     embeddings = state.get("embeddings", [])
 
-    if not chunks:
-        raise ValueError(
-            "chunks not found. Run text_splitter_node before vector_store_node."
+    if not chunks and not embeddings:
+        print("📂 No new chunks, loading existing vector store...")
+        logger.log_function_call("FAISS.load_local")
+        embedder = OpenAIEmbeddings(model="text-embedding-ada-002")
+        vectorstore = FAISS.load_local(
+            "faiss_index", embedder, allow_dangerous_deserialization=True
         )
+    else:
+        logger.log_function_call("FAISS.from_embeddings")
+        logger.log_api_call("OpenAI Embeddings", "Creating FAISS vector store")
 
-    if not embeddings:
-        raise ValueError(
-            "embeddings not found. Run embeddings_node before vector_store_node."
+        if not chunks:
+            raise ValueError(
+                "chunks not found. Run text_splitter_node before vector_store_node."
+            )
+
+        if not embeddings:
+            raise ValueError(
+                "embeddings not found. Run embeddings_node before vector_store_node."
+            )
+
+        processor = VectorStoreProcessor(model="text-embedding-ada-002")
+
+        vectorstore = processor.create_vector_store(
+            chunks=chunks, embeddings=embeddings, save_path="faiss_index"
         )
-
-    processor = VectorStoreProcessor(model="text-embedding-ada-002")
-
-    vectorstore = processor.create_vector_store(
-        chunks=chunks, embeddings=embeddings, save_path="faiss_index"
-    )
 
     return {**state, "vectorstore": vectorstore}
 
@@ -531,89 +676,16 @@ class ChatProcessor:
                 (
                     "system",
                     """
-        Role:
-        Your function is to generate a structured, well-organized blog strictly based on the provided context document.
+                    Role:
+                    Your function is to generate a structured, well-organized blog strictly based on the provided context document.
 
-        Instructions:
-        - Use ONLY the provided context.
-        - You may analyze, synthesize, and evaluate information from the context.
-        - Do NOT introduce external knowledge.
-        - Base your answer strictly on what is present in the context.
-        - If there is insufficient information, clearly state that.
-        
-        Template:
-        Instructions:
-            Use ONLY the provided context.
-
-            You may analyze, synthesize, and evaluate information from the context.
-
-            Do NOT introduce external knowledge.
-
-            Base your answer strictly on what is present in the context.
-
-            If there is insufficient information, clearly state that.
-
-            You MUST strictly follow the blog template structure below:
-
-            Title
-
-            Date / Category -> date can be todays and you can figure out the category from context
-
-            Introduction
-
-            Context
-
-            Core thesis
-
-            Supporting data
-
-            Preview of sections
-
-            Section 1 (H2)
-
-            Explanation
-
-            Examples
-
-            Supporting data/table
-
-            Section 2 (H2)
-
-            Impact discussion
-
-            Subheadings (H3)
-
-            Table (optional)
-
-            Section 3 (H2)
-
-            Analytical discussion
-
-            Case example
-
-            Challenges Section (H2)
-
-            Problem
-
-            Solutions
-
-            Future Trends Section (H2)
-
-            Emerging technologies
-
-            Strategic implications
-
-            Implications Section
-
-            FAQ Section
-
-            Q&A format
-
-            Conclusion
-
-            Related Posts
-        Your goal is to provide reasoned answers grounded in the document.
-        """,
+                    Instructions:
+                    - Use ONLY the provided context.
+                    - You may analyze, synthesize, and evaluate information from the context.
+                    - Do NOT introduce external knowledge.
+                    - Base your answer strictly on what is present in the context.
+                    - If there is insufficient information, clearly state that.
+                    """,
                 ),
                 ("user", "Context:\n{context}\n\nQuestion:\n{question}"),
             ]
@@ -655,8 +727,63 @@ def chat_node(state: GraphState) -> GraphState:
     return {**state, "generation": answer}
 
 
+
+def check_vector_store_exists(state: GraphState) -> Literal["exists", "not_exists"]:
+    faiss_path = "faiss_index"
+    if os.path.exists(faiss_path):
+        index_files = ["index.faiss", "index.pkl"]
+        if all(os.path.exists(os.path.join(faiss_path, f)) for f in index_files):
+            print("📂 Vector store exists")
+            return "exists"
+    print("📂 Vector store does not exist")
+    return "not_exists"
+
+
+def check_files_in_vector_db(state: GraphState) -> Literal["in_db", "not_in_db"]:
+    from langchain_community.vectorstores import FAISS
+    from langchain_openai import OpenAIEmbeddings
+
+    faiss_path = "faiss_index"
+    file_metadata = state.get("file_metadata", [])
+
+    if not file_metadata:
+        print("📂 No file metadata, running full pipeline")
+        return "not_in_db"
+
+    if not os.path.exists(faiss_path):
+        print("📂 Vector store not found, running full pipeline")
+        return "not_in_db"
+
+    try:
+        embedder = OpenAIEmbeddings(model="text-embedding-ada-002")
+        vectorstore = FAISS.load_local(
+            faiss_path, embedder, allow_dangerous_deserialization=True
+        )
+
+        file_names = [m.get("file_name", "") for m in file_metadata]
+
+        existing_content = []
+        for doc in vectorstore.docstore._dict.values():  # type: ignore
+            existing_content.append(doc.page_content)
+
+        for fname in file_names:
+            found = any(fname in content for content in existing_content)
+            if not found:
+                print(f"📂 File '{fname}' not in vector DB, running full pipeline")
+                return "not_in_db"
+
+        print(
+            f"📂 All files exist in vector DB, skipping to retrieval in filename {fname}"
+        )
+        return "in_db"
+    except Exception as e:
+        print(f"📂 Error checking vector DB: {e}, running full pipeline")
+        return "not_in_db"
+
+
 # WorkFlow Evalution------------------------------------------------------
 workflow = StateGraph(GraphState)
+workflow.add_node("meta", meta_node)
 workflow.add_node("ocr", ocr_node)
 workflow.add_node("image_analyzer", image_analyzer_node)
 workflow.add_node("text_split", text_splitter_node)
@@ -666,7 +793,12 @@ workflow.add_node("Retriever", retriever_node)
 workflow.add_node("chat_node", chat_node)
 
 
-workflow.add_edge(START, "ocr")
+workflow.add_edge(START, "meta")
+
+workflow.add_conditional_edges(
+    "meta", check_files_in_vector_db, {"in_db": "vector_store", "not_in_db": "ocr"}
+)
+
 # Parallel split
 workflow.add_edge("ocr", "text_split")
 workflow.add_edge("ocr", "image_analyzer")
@@ -678,7 +810,8 @@ workflow.add_edge("image_analyzer", "embeddings")
 
 workflow.add_edge("embeddings", "vector_store")
 workflow.add_edge("vector_store", "Retriever")
-# workflow.add_edge("Retriever","chat_node")
+
+#workflow.add_edge("Retriever","chat_node")
 workflow.add_edge("Retriever", END)
 
 
@@ -686,25 +819,37 @@ workflow.add_edge("Retriever", END)
 app = workflow.compile()
 
 # result = app.invoke({
-#     "question": "What is this document about?",
-#     "generation": "",
-#     "documents": [],
-#     "pdf_path": r"vishruth_ai.pdf"
-# })
+# Usage Examples:
+# --------------------------------------------------------------------
+
+# Example 1: Just get chunks (retrieve mode - no LLM call)
 
 result = app.invoke(
     {
-        "question": "please generate the blog for about goals and benifits ",
+        "file_paths": [
+            r"EComm Expo SM Content.docx",
+            r"EComm Expo SM Content.docx",
+            r"1-Cognixia-DEVops.pdf",
+        ],
+        "question": "what is neglecting security",
         "generation": "",
         "documents": [],
-        "pdf_path": r"/Users/vishruth/Downloads/Prudent (3).jpg",
         "chunks": [],
+        "chunks_sources": [],
         "images": [],
         "embeddings": [],
         "vectorstore": None,
         "retrieved_docs": [],
+        "file_metadata": [],
     }
 )
+
+# Print retrieved results cleanly
+print("\n" + "=" * 50)
+print("📊 RETRIEVAL RESULTS")
+print("=" * 50)
+print(f"\n📄 Total chunks found: {len(result.get('retrieved_docs', []))}")
+print(f"📁 Sources: {result.get('chunks_sources', [])}...")
 
 logger.finish()
 

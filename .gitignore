@@ -21,6 +21,8 @@ __pycache__/
 # PDF files
 *.pdf
 
+*.png
+
 # OCR output text
 *.txt
 
@@ -28,4 +30,7 @@ __pycache__/
 /extracted_images2
 /extracted_content
 /faiss_index
+/test.py
+/indira_foods
+/cognixia
 

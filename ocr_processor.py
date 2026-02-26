@@ -619,10 +619,17 @@ class GoogleVisionOCRProcessor:
     # Full Image Analysis
     # -------------------------------------------------------
     def extract_full_image_analysis(
-        self, image_bytes: bytes, client: "vision.ImageAnnotatorClient"
+        self,
+        image_bytes: bytes,
+        client: "vision.ImageAnnotatorClient",
+        filename: str = None,
     ):
         image = vision.Image(content=image_bytes)
         result = {}
+
+        # Add filename first (will appear before dominant_colors in JSON)
+        if filename:
+            result["filename"] = filename
 
         # Get dominant colors for color_positions
         dominant_colors = self.extract_dominant_colors(
@@ -1008,6 +1015,7 @@ class GoogleVisionOCRProcessor:
             raise ValueError(f"Not a valid PDF (missing %PDF- header): {pdf_path}")
 
         with pdfplumber.open(pdf_path) as pdf:
+            pdf_name = os.path.splitext(os.path.basename(pdf_path))[0]
             for i, page in enumerate(pdf.pages):
                 pdf_width = page.width
                 pdf_height = page.height
@@ -1041,7 +1049,9 @@ class GoogleVisionOCRProcessor:
                 pil_image.save(img_bytes, format="PNG")
 
                 analysis = self.extract_full_image_analysis(
-                    image_bytes=img_bytes.getvalue(), client=client
+                    image_bytes=img_bytes.getvalue(),
+                    client=client,
+                    filename=f"{pdf_name}.pdf",
                 )
 
                 # Get text colors using new Vision API method
@@ -1068,6 +1078,7 @@ class GoogleVisionOCRProcessor:
                 }
 
                 json_path = img_path.replace(".png", "_analysis.json")
+
                 with open(json_path, "w", encoding="utf-8") as f:
                     json.dump(analysis, f, indent=2, ensure_ascii=False)
 
@@ -1093,7 +1104,9 @@ class GoogleVisionOCRProcessor:
             image_bytes = f.read()
 
         analysis = self.extract_full_image_analysis(
-            image_bytes=image_bytes, client=client
+            image_bytes=image_bytes,
+            client=client,
+            filename=os.path.basename(image_path),
         )
 
         # Get text colors using new Vision API method
@@ -1110,6 +1123,7 @@ class GoogleVisionOCRProcessor:
         analysis.pop("text_preview", None)
 
         json_path = os.path.splitext(stored_img_path)[0] + "_analysis.json"
+
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(analysis, f, indent=2, ensure_ascii=False)
 
@@ -1292,17 +1306,14 @@ class GoogleVisionOCRProcessor:
 
                     # analysis json next to image
                     analysis = self.extract_full_image_analysis(
-                        image_bytes=img.blob, client=client
+                        image_bytes=img.blob, client=client, filename=f"{ppt_name}.pptx"
                     )
                     json_path = os.path.splitext(img_path)[0] + "_analysis.json"
+
                     with open(json_path, "w", encoding="utf-8") as jf:
                         json.dump(analysis, jf, indent=4, ensure_ascii=False)
 
                     image_paths.append(img_path)
-
-                    json_path = os.path.splitext(img_path)[0] + "_analysis.json"
-                    with open(json_path, "w", encoding="utf-8") as jf:
-                        json.dump(analysis, jf, indent=4, ensure_ascii=False)
 
                     if analysis.get("text_preview"):
                         lines.append("\n--- Image OCR Text ---")
@@ -1363,9 +1374,10 @@ class GoogleVisionOCRProcessor:
                     f.write(img)
 
                 analysis = self.extract_full_image_analysis(
-                    image_bytes=img, client=client
+                    image_bytes=img, client=client, filename=f"{doc_name}.docx"
                 )
                 json_path = os.path.splitext(img_path)[0] + "_analysis.json"
+
                 with open(json_path, "w", encoding="utf-8") as jf:
                     json.dump(analysis, jf, indent=4, ensure_ascii=False)
 
