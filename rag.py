@@ -187,7 +187,7 @@ def meta_node(state: GraphState) -> GraphState:
 # ----------------------------------------------------------------------------------------------------------------------
 # Node1: OCR Node
 from pathlib import Path
-from ocr_processor_copy import GoogleVisionOCRProcessor
+from ocr_processor import GoogleVisionOCRProcessor
 from docx import Document
 
 
@@ -293,7 +293,7 @@ def ocr_node(state: GraphState) -> GraphState:
 
 
 from pathlib import Path
-from ocr_processor_copy import GoogleVisionOCRProcessor
+from ocr_processor import GoogleVisionOCRProcessor
 
 
 def image_analyzer_node(state: GraphState) -> GraphState:
@@ -811,8 +811,8 @@ workflow.add_edge("image_analyzer", "embeddings")
 workflow.add_edge("embeddings", "vector_store")
 workflow.add_edge("vector_store", "Retriever")
 
-#workflow.add_edge("Retriever","chat_node")
-workflow.add_edge("Retriever", END)
+workflow.add_edge("Retriever","chat_node")
+workflow.add_edge("chat_node", END)
 
 
 # -------------------------------------------------
