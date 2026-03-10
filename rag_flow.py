@@ -223,7 +223,7 @@ def meta_node(state: GraphState) -> GraphState:
 # ----------------------------------------------------------------------------------------------------------------------
 # Node1: OCR Node
 from pathlib import Path
-from ocr_processor_copy import GoogleVisionOCRProcessor
+from ocr_processor import GoogleVisionOCRProcessor
 from docx import Document
 
 
@@ -328,7 +328,7 @@ def ocr_node(state: GraphState) -> GraphState:
 
 
 from pathlib import Path
-from ocr_processor_copy import GoogleVisionOCRProcessor
+from ocr_processor import GoogleVisionOCRProcessor
 
 
 def image_analyzer_node(state: GraphState) -> GraphState:
@@ -1112,7 +1112,7 @@ def generate_image(state: GraphState) -> GraphState:
     prompt = state["prompt"]
 
     response = client.images.generate(
-        model="gpt-image-1",
+        model="gpt-image-1-mini",
         prompt=prompt,
         size="1024x1024",
     )
@@ -1616,6 +1616,7 @@ result = app.invoke(
             r"C:\Users\rkart\Downloads\Brandlovestudioai\cognixia\US-Cognixia-Logo 1.png",
             r"C:\Users\rkart\Downloads\Brandlovestudioai\cognixia\Website Colors 1.pdf",
             r"C:\Users\rkart\Downloads\Brandlovestudioai\cognixia\Website Font Style 2.pdf",
+            r"C:\Users\rkart\Downloads\Brandlovestudioai\cognixia\2-women-in-tech.png"
         ],
         "goal": """
         Generate structured content for a 1-page enterprise blog template about

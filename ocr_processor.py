@@ -1334,6 +1334,62 @@ class GoogleVisionOCRProcessor:
             "output_folder": out_folder,
         }
 
+    def extract_text_from_pptx(
+        self,
+        pptx_path: str,
+        output_dir: str = "extracted_content",
+    ) -> dict:
+        """Extract selectable text from PPTX without processing images."""
+        if not os.path.isfile(pptx_path):
+            raise FileNotFoundError(f"File not found: {pptx_path}")
+
+        try:
+            from pptx import Presentation
+            from pptx.enum.shapes import MSO_SHAPE_TYPE
+        except ImportError:
+            raise ImportError(
+                "python-pptx is required. Install with: pip install python-pptx"
+            )
+
+        prs = Presentation(pptx_path)
+
+        ppt_name = os.path.splitext(os.path.basename(pptx_path))[0]
+        out_folder = os.path.join(output_dir, ppt_name)
+        os.makedirs(out_folder, exist_ok=True)
+
+        lines = []
+
+        for s_idx, slide in enumerate(prs.slides, start=1):
+            lines.append(f"\n--- Slide {s_idx} ---")
+
+            for shape in slide.shapes:
+                if hasattr(shape, "has_text_frame") and shape.has_text_frame:
+                    txt = (shape.text or "").strip()
+                    if txt:
+                        lines.append(txt)
+
+                if hasattr(shape, "has_table") and shape.has_table:
+                    for row in shape.table.rows:
+                        row_text = " | ".join(
+                            (cell.text or "").strip() for cell in row.cells
+                        ).strip()
+                        if row_text:
+                            lines.append(row_text)
+
+        extracted_text = "\n".join(lines).strip()
+
+        out_txt = os.path.join(out_folder, f"{ppt_name}_ocr.txt")
+        with open(out_txt, "w", encoding="utf-8") as f:
+            f.write(extracted_text)
+
+        print(f"✅ PPTX text saved to: {out_txt}")
+
+        return {
+            "text": extracted_text,
+            "text_path": out_txt,
+            "output_folder": out_folder,
+        }
+
     def extract_images_from_docx(
         self,
         docx_path: str,

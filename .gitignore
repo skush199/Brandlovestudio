@@ -12,6 +12,7 @@ venv/
 # for .docx extensions files
 *.docx
 
+*.DS_Store
 
 # Python cache
 __pycache__/
