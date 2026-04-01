@@ -12,6 +12,43 @@ from openai import OpenAI
 load_dotenv()
 
 
+class ImageDescriptionStore:
+    def __init__(self, store_path: str = "image_descriptions.json"):
+        self.store_path = store_path
+
+    def load(self) -> dict:
+        if os.path.exists(self.store_path):
+            try:
+                with open(self.store_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, IOError) as e:
+                print(f"  ⚠️ Error loading image descriptions: {e}")
+        return {}
+
+    def save(self, descriptions: dict) -> None:
+        existing = self.load()
+        existing.update(descriptions)
+        try:
+            with open(self.store_path, "w", encoding="utf-8") as f:
+                json.dump(existing, f, indent=2, ensure_ascii=False)
+            print(
+                f"  💾 Saved {len(descriptions)} image descriptions to {self.store_path}"
+            )
+        except IOError as e:
+            print(f"  ⚠️ Error saving image descriptions: {e}")
+
+    def get_descriptions_for_images(self, image_paths: list) -> dict:
+        all_descriptions = self.load()
+        return {
+            path: all_descriptions.get(path)
+            for path in image_paths
+            if path in all_descriptions
+        }
+
+
+image_desc_store = ImageDescriptionStore()
+
+
 class APILogger:
     def __init__(self, log_file="log.txt"):
         self.log_file = log_file
@@ -99,6 +136,27 @@ from typing import List, Dict
 from typing_extensions import NotRequired
 from typing import Annotated
 from operator import add
+from sklearn.metrics.pairwise import cosine_similarity
+
+
+def dict_merge(x: dict, y: dict) -> dict:
+    """Merge two dictionaries (y overwrites x)."""
+    if x is None:
+        return y
+    if y is None:
+        return x
+    result = dict(x)
+    result.update(y)
+    return result
+
+
+def list_merge(x: list, y: list) -> list:
+    """Merge two lists (extend)."""
+    if x is None:
+        return y if y else []
+    if y is None:
+        return x
+    return list(x) + list(y)
 
 
 import pickle
@@ -146,12 +204,15 @@ class GraphState(TypedDict):
     creatives_files: Annotated[List[str], add]
     strategy_decks_files: Annotated[List[str], add]
     mode: Literal["retrieve", "chat"]
-    question: str
-    question_metadata: str
-    question_strategy: str
-    question_brand: str
+    question: Annotated[str, lambda x, y: y]
+    question_metadata: Annotated[str, lambda x, y: y]
+    question_strategy: Annotated[str, lambda x, y: y]
+    question_brand: Annotated[str, lambda x, y: y]
     generation: NotRequired[str]  # written by chat_node
-    documents: List[Dict]
+    db_answers: Annotated[Dict[str, str], dict_merge]
+    blog_text: NotRequired[str]
+    blog_summary: NotRequired[str]
+    documents: Annotated[List[Dict], lambda x, y: y]
     # chunks: List[str]
     chunks: Annotated[List[str], add]
     # chunks_sources: List[Dict]
@@ -160,13 +221,14 @@ class GraphState(TypedDict):
     images: Annotated[List[str], add]
     # embeddings: List[List[float]]
     embeddings: Annotated[List[List[float]], add]
-    vectorstore: object
-    retrieved_docs: Dict
+    vectorstore: Annotated[object, lambda x, y: y]
+    # retrieved_docs: Dict  # FIX: Use dict_merge for dict combination
+    retrieved_docs: Annotated[Dict, dict_merge]
     # retrieved_docs: Annotated[List, add]
-    retrieved_docs_metadata: List[Dict]
-    retrieved_docs_strategy: List[Dict]
-    retrieved_docs_brand: List[Dict]
-    file_metadata: List[Dict]
+    retrieved_docs_metadata: Annotated[List[Dict], list_merge]
+    retrieved_docs_strategy: Annotated[List[Dict], list_merge]
+    retrieved_docs_brand: Annotated[List[Dict], list_merge]
+    file_metadata: Annotated[List[Dict], list_merge]
     target_db: str
     metadata_docs: List[Dict]
     strategy_docs: List[Dict]
@@ -183,6 +245,8 @@ class GraphState(TypedDict):
     prompt_metadata: NotRequired[str]
     prompt_strategy: NotRequired[str]
     prompt_brand: NotRequired[str]
+    # --- image descriptions from GPT-4o vision ---
+    image_descriptions: Annotated[Dict[str, str], dict_merge]
 
 
 def check_file_type(file_path: str) -> str:
@@ -270,9 +334,11 @@ def resolve_brand_file_paths(state: GraphState) -> GraphState:
 
     resolved_paths = find_files_in_brand_folders(all_file_names)
 
+    creatives_count = len(creatives)
     print(f"  ✅ Resolved {len(resolved_paths)} files from brand folders")
+    print(f"  📊 Creative samples count: {creatives_count}")
 
-    return {"file_paths": resolved_paths}
+    return {"file_paths": resolved_paths, "creatives_count": creatives_count}
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -583,6 +649,97 @@ def image_analyzer_node(state: GraphState) -> GraphState:
     return {"images": all_images}
 
 
+def generate_image_descriptions_node(state: GraphState) -> GraphState:
+    print("🎨 Running Image Descriptions Node...")
+    logger.log_workflow("generate_image_descriptions_node")
+    logger.log_api_call("OpenAI Vision", "Generating image descriptions")
+
+    images = state.get("images", [])
+    image_descriptions = {}
+
+    if not images:
+        print("  No images to describe")
+        return {"image_descriptions": {}}
+
+    cached_descriptions = image_desc_store.load()
+    images_to_process = []
+    for img_path in images:
+        if img_path in cached_descriptions:
+            print(f"  ✅ Using cached description for: {os.path.basename(img_path)}")
+            image_descriptions[img_path] = cached_descriptions[img_path]
+        else:
+            images_to_process.append(img_path)
+
+    if not images_to_process:
+        print(f"  📝 All {len(image_descriptions)} images have cached descriptions")
+        return {"image_descriptions": image_descriptions}
+
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+    for img_path in images_to_process:
+        if not os.path.exists(img_path):
+            print(f"  ⚠️ Image not found: {img_path}")
+            continue
+
+        try:
+            with open(img_path, "rb") as img_file:
+                img_data = img_file.read()
+
+            base64_image = base64.b64encode(img_data).decode("utf-8")
+
+            prompt_text = """Analyze this creative/marketing material and provide a detailed description covering:
+
+1. VISUAL CONTENT: What is physically shown (people, objects, setting, scene, background, lighting)
+2. CONTENT TYPE & MEANING: What kind of content is this (e.g., lifestyle shot, product showcase, testimonial, infographic, brand story) and what message or meaning is it trying to convey
+3. VISUAL ELEMENTS: Describe any graphs, charts, icons, graphics, or visual elements present and what meaning/purpose they serve
+4. VISUAL STYLE: Overall style (photograph, illustration, minimalist, bold, elegant, casual, professional, etc.)
+5. COMPOSITION: How elements are arranged (centered, Rule of thirds, symmetrical, asymmetrical)
+6. MOOD & TONE: What emotion or feeling does this image evoke
+7. COLORS & LIGHTING: Dominant colors, color mood, lighting style (natural, artificial, dramatic, soft)
+8. TEXT: Any visible text and its placement/role in the design
+
+Be specific and descriptive - this will be used to generate new marketing creatives."""
+
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                temperature=0.3,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt_text},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{base64_image}"
+                                },
+                            },
+                        ],
+                    }
+                ],
+            )
+
+            description = response.choices[0].message.content.strip()
+            image_descriptions[img_path] = description
+
+            print(f"  ✅ Generated description for: {os.path.basename(img_path)}")
+
+            desc_file_path = os.path.splitext(img_path)[0] + "_description.txt"
+            with open(desc_file_path, "w", encoding="utf-8") as f:
+                f.write(description)
+            print(f"  💾 Saved description to: {desc_file_path}")
+
+        except Exception as e:
+            print(f"  ⚠️ Error describing image {img_path}: {e}")
+            image_descriptions[img_path] = f"Error generating description: {str(e)}"
+
+    if image_descriptions:
+        image_desc_store.save(image_descriptions)
+
+    print(f"  📝 Generated {len(image_descriptions)} image descriptions")
+    return {"image_descriptions": image_descriptions}
+
+
 def split_by_type_node(state: GraphState) -> GraphState:
     print("🔀 Running Split by Type Node...")
     logger.log_workflow("split_by_type_node")
@@ -822,6 +979,12 @@ def embeddings_node(state: GraphState) -> GraphState:
     print("🟣 Running Embeddings Node...")
     logger.log_workflow("embeddings_node")
 
+    # DEBUG: Check incoming image_descriptions
+    incoming_img_desc = state.get("image_descriptions", {})
+    print(
+        f"  🔍 DEBUG embeddings_node INPUT: image_descriptions count = {len(incoming_img_desc)}"
+    )
+
     chunks = state.get("chunks", [])
     chunks_sources = state.get("chunks_sources", [])
     images = state.get("images", [])
@@ -835,9 +998,9 @@ def embeddings_node(state: GraphState) -> GraphState:
     brand_data_path = None
 
     if target_db in ["brand", "main"]:
-        brand_data_path = "brand.json"
+        brand_data_path = "brand_jiraaf.json"
     elif target_db == "faiss":
-        brand_data_path = "Niroggi_data.json"
+        brand_data_path = "Jiraaf_data.json"
 
     if brand_data_path and os.path.exists(brand_data_path):
         with open(brand_data_path, "r", encoding="utf-8") as f:
@@ -896,10 +1059,12 @@ def embeddings_node(state: GraphState) -> GraphState:
 
     # Return ONLY changed keys — fan-in with image_analyzer means both feed
     # create_all_vector_stores; returning {**state,...} would cause concurrent-write error.
+    image_descriptions = state.get("image_descriptions", {})
     return {
         "chunks": combined_inputs,
         "chunks_sources": combined_sources,
         "embeddings": vectors,
+        "image_descriptions": image_descriptions,
     }
 
 
@@ -1040,12 +1205,21 @@ def store_brand_data_in_variables(brand_data: dict):
 def load_brand_data_node(state: GraphState) -> GraphState:
     print("🏷 Loading Brand Data...")
 
-    if os.path.exists("brand.json"):
-        with open("brand.json", "r", encoding="utf-8") as f:
-            brand_data = json.load(f)
-        return {"brand_data": brand_data}  # return ONLY changed key
+    brand_data = {}
 
-    return {}  # nothing to update
+    if os.path.exists("brand_jiraaf.json"):
+        with open("brand_jiraaf.json", "r", encoding="utf-8") as f:
+            brand_data = json.load(f)
+        print("  ✅ Loaded from brand_jiraaf.json")
+    elif os.path.exists("Jiraaf_data.json"):
+        with open("Jiraaf_data.json", "r", encoding="utf-8") as f:
+            brand_data = json.load(f)
+        print("  ✅ Loaded from Jiraaf_data.json")
+
+    if brand_data:
+        return {**state, "brand_data": brand_data}
+
+    return state
 
 
 def build_strategy_prompt(template: str, json_path: str, goal: str = ""):
@@ -1153,7 +1327,7 @@ def multi_retriever_node(state: GraphState) -> GraphState:
 
     question_strategy = build_strategy_prompt(
         template=question_strategy_template,
-        json_path="Niroggi_data.json",
+        json_path="Jiraaf_data.json",
         goal=state.get("goal", ""),
     )
     question_brand = state.get("question_brand", "")
@@ -1268,7 +1442,11 @@ class ChatProcessor:
                     - If there is insufficient information, clearly state that.
                     """,
                 ),
-                ("user", "Context:\n{context}\n\nQuestion:\n{question}"),
+                # ("user", "Context:\n{context}\n\nQuestion:\n{question}"),
+                (
+                    "user",
+                    "Goal:\n{goal}\n\nContext:\n{context}\n\nQuestion:\n{question}",
+                ),
             ]
         )
 
@@ -1277,8 +1455,16 @@ class ChatProcessor:
         # 🔵 Pre-build chain once (better than rebuilding every call)
         self.chain = self.prompt | self.llm | self.output_parser
 
-    def generate_answer(self, question: str, context: str) -> str:
-        return self.chain.invoke({"question": question, "context": context})
+    # def generate_answer(self, question: str, context: str) -> str:
+    #     return self.chain.invoke({"question": question, "context": context})
+    def generate_answer(self, question: str, context: str, goal: str) -> str:
+        return self.chain.invoke(
+            {
+                "question": question,
+                "context": context,
+                "goal": goal,
+            }
+        )
 
 
 # Node function
@@ -1287,6 +1473,7 @@ def chat_node(state: GraphState) -> GraphState:
     logger.log_workflow("chat_node")
     logger.log_api_call("OpenAI Chat", "Generating responses")
 
+    goal = state.get("goal", "")
     question = state.get("question", "")
     question_metadata = state.get("question_metadata", "")
     question_strategy = state.get("question_strategy", "")
@@ -1327,7 +1514,12 @@ def chat_node(state: GraphState) -> GraphState:
                     context_parts.append(content)
 
             context = "\n\n".join(context_parts)
-            answer = processor.generate_answer(question=db_question, context=context)
+            # answer = processor.generate_answer(question=db_question, context=context)
+            answer = processor.generate_answer(
+                question=db_question,
+                context=context,
+                goal=goal,
+            )
             answers[db_name] = answer
 
             print(f"\n📢 {db_name.upper()} Answer:")
@@ -1337,8 +1529,13 @@ def chat_node(state: GraphState) -> GraphState:
     else:
         if question:
             context = "\n\n".join(retrieved_docs)
+            # answers["main"] = processor.generate_answer(
+            #     question=question, context=context
+            # )
             answers["main"] = processor.generate_answer(
-                question=question, context=context
+                question=question,
+                context=context,
+                goal=goal,
             )
             print(f"\n📢 MAIN Answer:")
             print(answers["main"])
@@ -1358,7 +1555,18 @@ def chat_node(state: GraphState) -> GraphState:
     # blog_context = "\n\n".join([f"{k.upper()}:\n{v}" for k, v in answers.items()])
     # blog_text = processor.generate_answer(question=blog_question, context=blog_context)
 
-    return {"generation": str(answers)}
+    # Save db_answers to file for persistence
+    try:
+        with open("db_answers.json", "w", encoding="utf-8") as f:
+            json.dump(answers, f, ensure_ascii=False, indent=2)
+        print(f"  💾 Saved db_answers to db_answers.json")
+    except Exception as e:
+        print(f"  ⚠️ Error saving db_answers: {e}")
+
+    return {
+        "generation": json.dumps(answers, ensure_ascii=False, indent=2),
+        "db_answers": answers,
+    }
 
 
 # -----------------------------
@@ -1529,55 +1737,184 @@ def generate_prompt_main(state) -> dict:
 
 def generate_prompt_metadata(state) -> dict:
     """
-    Generates a DALL-E prompt grounded in METADATA / DESIGN documents only.
+    Generates visual execution rules grounded in METADATA / CREATIVE SAMPLE documents only.
     Result stored in state["prompt_metadata"].
+    Uses gpt-4.1-mini and extracts ONLY visible text-color and layout patterns.
     """
     print("🎨 Running Generate Prompt (METADATA) Node...")
 
     SYSTEM_GOAL = """
+You are the VISUAL LAYOUT + EXECUTION RULES agent.
+Model: gpt-4.1-mini
 
-    You are a senior brand content strategist for {Brand_Name}.
-    Your responsibility is to retrieve, interpret, and synthesize the core content and messaging direction for a branded marketing poster using ONLY the retrieved main-content knowledge and the brand context provided by the user.
-    You must follow these non-negotiable rules at all times:
-    
-    1. Retrieve and synthesize ONLY the message and content direction aligned with the provided brand context.
-    2. Every output field MUST reflect the emotion: {Primary_Emotion} in tone and message framing.
-    3. NEVER include wording, themes, or claims that trigger the emotion: {Avoided_Emotion}.
-    4. All retrieved content MUST serve the goal: {goal} and align with the mission: {Brand_Mission}.
-    5. Apply {What_To_Do} as behavioral guardrails at all times.
-    6. Apply {What_Not_To_Do} as hard restrictions with no exceptions.
-    7. Focus only on visual design rules and layout execution.
-    8. Extract layout structure, spacing, typography hierarchy, and color usage rules.
-    9. Provide guidance usable by an image generation system.
-    10. Do not invent unsupported claims.
-    11. Do not generate the final image prompt.
-    12. If any field is unavailable, return exactly: "MISSING".
-    
-    Your output must strictly follow this exact structure:
-    
-    1. Primary Campaign Theme
-    2. Core Audience Message
-    3. Headline Direction
-    4. Supporting Copy Direction
-    5. CTA Intent
-    6. Key Value Proposition
-    7. Important Keywords/Phrases
-    8. Emotional Messaging Direction
-    9. What Must Be Avoided In Messaging
+Your job is to study the retrieved creative samples and extract the visual system they follow.
 
-    """
+You must infer and preserve:
+- where headline usually appears
+- where body text usually appears
+- where CTA usually appears
+- where footer usually appears
+- where logo usually appears
+- where the main subject/person usually appears
+- how empty space is reserved for text
+- how text avoids faces/subjects
+- how the layout flows from top to bottom / left to right
+- what side is text-heavy vs image-heavy
+- how sections are stacked
+
+Non-negotiable rules:
+1. Use ONLY the user-provided sample creatives and retrieved metadata context.
+2. Do NOT invent layout patterns that are not supported by repeated visual evidence.
+3. Preserve role-based text color hierarchy from the samples.
+4. Preserve role-based layout hierarchy from the samples.
+5. Focus on relative layout zones, not exact pixels.
+6. Preserve the same reading flow and same visual balance as the samples.
+7. Preserve the same side dominance if evident (for example: text-left / subject-right).
+8. Preserve safe empty areas for text if the samples imply them.
+9. Do NOT output explanations.
+10. If unclear, return MISSING rather than guessing.
+
+Return exactly in this structure:
+
+[TEXT COLOR SYSTEM]
+Headline Text Color:
+Body Text Color:
+Highlight / Emphasis Text Color:
+Large Numeral Text Color:
+CTA Text Color:
+CTA Background / Accent Color:
+Footer Text Color:
+Footer Background Color:
+Divider / Accent Line Color:
+
+[POSITIONAL LAYOUT MAP]
+Headline Position:
+Subheadline Position:
+Body Text Position:
+CTA Position:
+Footer Position:
+Logo Position:
+Primary Subject Position:
+Secondary Subject Position:
+Icon / Illustration Position:
+Empty / Safe Text Zones:
+Text Alignment Pattern:
+Reading Flow Pattern:
+Section Stacking Pattern:
+Text-heavy Side:
+Image-heavy Side:
+
+[CREATIVE CONTENT DESCRIPTIONS - CRITICAL]
+Based on the image descriptions provided, extract:
+1. What visual content is shown in each creative (people, objects, settings, scenes)
+2. What type of content each creative represents (lifestyle shot, product showcase, infographic, testimonial, brand story, etc.)
+3. What message or meaning each creative is trying to convey
+4. What graphs, charts, icons, or visual elements are present and what purpose they serve
+5. Visual style (photograph, illustration, minimalist, bold, elegant, etc.)
+6. Mood and tone of each creative
+7. How the visual content aligns with the brand message
+
+[LAYOUT SUPPORT]
+Text Placement Pattern:
+CTA Placement Pattern:
+Footer Placement Pattern:
+Typography Hierarchy:
+Contrast Pattern:
+Face/Subject Avoidance Pattern:
+Spacing / Margin Pattern:
+Grid / Section Structure:
+Balance Pattern:
+
+[IMAGE COUNT]
+Number of Subjects/People:
+Subject Positioning Pattern:
+
+[IMAGE LAYOUT]
+Layout Pattern:
+Subject Placement:
+Background Style:
+
+[ENFORCEMENT RULES]
+- Follow the sample text-color hierarchy exactly where supported.
+- Follow the sample positional layout map exactly where supported.
+- Keep headline, body, CTA, footer, logo, and subject in the same relative zones as the samples.
+- Do not move CTA/footer/logo to a new side unless the samples are unclear.
+- Do not place text over faces or key subjects.
+- Preserve empty space reserved for text.
+- Preserve the same reading flow and section stacking pattern.
+- CRITICAL: Include similar types of visual content, graphs, charts, icons, or visual elements as shown in the sample creatives
+- If the samples contain infographics, include appropriate data visualizations
+- If the samples show lifestyle imagery, include relevant lifestyle elements
+- Match the overall visual style (photograph vs illustration, minimalist vs detailed) of the samples
+"""
 
     USER_GOAL = """
-    ## BRAND CONTEXT
-    {Brand_Name} is a brand operating with the mission of {Brand_Mission} and a long-term vision of {Brand_Vision}. The brand promises its customers {Brand_Promise} and is positioned in the market as {Market_Positioning}, standing apart through its key differentiators: {Key_Differentiators}. The brand primarily serves a {Audience_Type} audience, with the persona playing the role of {Persona_Role}, driven by goals such as {Persona_Goals} and facing pain points including {Fear_And_Pain_Points}. The current strategic goal guiding this retrieval is {goal}. In all communications, the brand must lead with the emotion of {Primary_Emotion} and must strictly avoid evoking {Avoided_Emotion}. The brand always follows these behavioral principles — {What_To_Do} — and must never engage in the following — {What_Not_To_Do}.
-    
-    ## RETRIEVED METADATA CONTEXT
-    {retrieved_metadata}
-    
-    ## TASK
-    Using only the retrieved main content and the brand context above, extract and synthesize the poster messaging direction.
+## BRAND CONTEXT
+{Brand_Name} is a brand operating with the mission of {Brand_Mission} and a long-term vision of {Brand_Vision}. The brand promises its customers {Brand_Promise} and is positioned in the market as {Market_Positioning}, standing apart through its key differentiators: {Key_Differentiators}. The brand primarily serves a {Audience_Type} audience.
 
-    """
+## RETRIEVED SAMPLE CREATIVES (METADATA)
+{retrieved_metadata}
+
+## TASK
+From the provided sample creatives, extract ONLY visibly supported visual execution and layout rules.
+
+Return exactly:
+1) Headline text color
+2) Body text color
+3) Highlight/emphasis text color
+4) Large numeral text color
+5) CTA text color
+6) CTA background/accent color
+7) Footer text color
+8) Footer background color
+9) Divider/accent line color
+
+10) Headline position
+11) Subheadline position
+12) Body text position
+13) CTA position
+14) Footer position
+15) Logo position
+16) Primary subject position
+17) Secondary subject position
+18) Icon / illustration position
+19) Empty / safe text zones
+20) Text alignment pattern
+21) Reading flow pattern
+22) Section stacking pattern
+23) Text-heavy side
+24) Image-heavy side
+
+25) Text placement pattern
+26) CTA placement pattern
+27) Footer placement pattern
+28) Typography hierarchy
+29) Contrast pattern
+30) Face/Subject avoidance pattern
+31) Spacing / margin pattern
+32) Grid / section structure
+33) Balance pattern
+
+34) Number of subjects/people
+35) Subject positioning pattern
+36) Layout pattern
+37) Subject placement
+38) Background style
+
+39) Creative Content Descriptions (from image analysis)
+40) Content Type & Meaning for each creative
+41) Graphs/Charts/Visual Elements present
+42) Visual Style Summary
+43) Mood and Tone
+
+Rules:
+- Use only what is visible in the samples
+- Do not guess
+- If unclear, return MISSING
+- Prioritize repeated patterns across multiple samples
+- Preserve relative positioning, not exact pixels
+- Infer layout only from repeated visible evidence
+"""
     brand = state.get("brand_data", {})
     goal = state.get("goal", "")
 
@@ -1620,10 +1957,24 @@ def generate_prompt_metadata(state) -> dict:
         goal=goal,
     )
 
-    prompt = _call_openai(system_msg, user_content)
+    prompt = _call_openai_visual(system_msg, user_content)
 
     # Return ONLY the key this node writes — avoids concurrent-write conflict in fan-out
     return {"prompt_metadata": prompt}
+
+
+def _call_openai_visual(system_msg: str, user_content: str) -> str:
+    """Visual execution rules agent - uses gpt-4.1-mini for strict text-color extraction."""
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    response = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        temperature=0.0,
+        messages=[
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_content},
+        ],
+    )
+    return response.choices[0].message.content.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -1766,20 +2117,25 @@ def generate_prompt_brand(state) -> dict:
 
     Your output must strictly follow this exact structure:
 
-    1. Brand Personality
-    2. Brand Tone of Voice
-    3. Brand Emotional Direction
-    4. Brand Promise Expression
-    5. Market Positioning Expression
-    6. Key Differentiators To Emphasize
-    7. Audience Impression The Brand Should Create
-    8. Visual Identity Cues
-    9. Typography Guidance
-    10. Brand-Safe Style Keywords
-    11. What The Brand Must Always Communicate
-    12. What The Brand Must Never Communicate
-    13. What To Do
-    14. What Not To Do
+        1. Brand Personality
+        2. Brand Tone of Voice
+        3. Brand Emotional Direction
+        4. Brand Promise Expression
+        5. Market Positioning Expression
+        6. Key Differentiators To Emphasize
+        7. Audience Impression The Brand Should Create
+        8. Visual Identity Cues
+        9. Typography Guidance
+        10. Brand-Safe Style Keywords
+        11. Layout System Rules
+        12. Logo Placement / Safe Area Rules
+        13. CTA Placement Preference
+        14. Footer Structure Rules
+        15. Grid / Alignment / Whitespace Rules
+        16. What The Brand Must Always Communicate
+        17. What The Brand Must Never Communicate
+        18. What To Do
+        19. What Not To Doo
     """
 
     USER_GOAL = """
@@ -1861,6 +2217,100 @@ def generate_prompt_brand(state) -> dict:
 def merge_prompts(state) -> dict:
     print("🔀 Running Merge Prompts Node...")
 
+    text_style = ""
+    brand_data = state.get("brand_data", {})
+
+    if brand_data:
+        typography = brand_data.get("Typography", {})
+        if typography:
+            text_style = typography.get("Text_style", "")
+
+    if not text_style:
+        jiraaf_path = "Jiraaf_data.json"
+        if os.path.exists(jiraaf_path):
+            try:
+                with open(jiraaf_path, "r", encoding="utf-8") as f:
+                    jiraaf_data = json.load(f)
+                typography = jiraaf_data.get("Typography", {})
+                if typography:
+                    text_style = typography.get("Text_style", "")
+            except Exception as e:
+                print(f"  ⚠️ Error reading Jiraaf_data.json for typography: {e}")
+
+    typography_section = ""
+    if text_style:
+        typography_section = f"""
+[TYPOGRAPHY REQUIREMENTS - MANDATORY]
+- Typography style from brand JSON: {text_style}
+- Use this exact typography style for all text in the image
+- Apply this to headline, subheadline, body text, CTA buttons, footer, and numerals
+- Do not substitute it with a different typography style
+- Keep all text visually consistent with this exact typography style
+""".strip()
+
+        print(f"  🔤 Adding font style from JSON to merged prompt: {text_style}")
+
+    image_descriptions = state.get("image_descriptions", {})
+
+    if not image_descriptions:
+        print("  ⚠️ No image_descriptions in state, loading from persistent store...")
+        image_descriptions = image_desc_store.load()
+
+    print(
+        f"  🔍 DEBUG: image_descriptions in state at merge_prompts: {len(image_descriptions)} descriptions"
+    )
+
+    goal = state.get("goal", "")
+
+    if image_descriptions and goal:
+        print(f"  🎯 Filtering top 5 image descriptions by goal relevance...")
+        embedder = OpenAIEmbeddings(model="text-embedding-ada-002")
+        goal_embedding = embedder.embed_query(goal)
+
+        desc_with_scores = []
+        for img_path, desc in image_descriptions.items():
+            desc_embedding = embedder.embed_query(desc)
+            similarity = cosine_similarity([goal_embedding], [desc_embedding])[0][0]
+            desc_with_scores.append((img_path, desc, similarity))
+
+        desc_with_scores.sort(key=lambda x: x[2], reverse=True)
+        top_5 = desc_with_scores[:5]
+
+        image_descriptions = {img_path: desc for img_path, desc, _ in top_5}
+        print(f"  ✅ Filtered to top 5 relevant descriptions")
+
+    visual_content_section = ""
+    if image_descriptions:
+        print(
+            f"  🖼 Image descriptions found in state: {len(image_descriptions)} images"
+        )
+        desc_parts = []
+        for img_path, desc in image_descriptions.items():
+            img_name = os.path.basename(img_path)
+            desc_parts.append(f"--- Image: {img_name} ---\n{desc}")
+        visual_content_section = f"""
+[CREATIVE VISUAL CONTENT DESCRIPTIONS - STRICT REFERENCE]
+The following are the top 5 goal-relevant sample creatives. You MUST follow these EXACTLY:
+
+{chr(10).join(desc_parts)}
+
+STRICT ANTI-HALLUCINATION RULES:
+- ONLY include visual elements explicitly described above (graphs, charts, icons, people, objects, layouts)
+- DO NOT invent, assume, or add any graphics, icons, charts, or elements NOT present in these descriptions
+- DO NOT hallucinate visual elements that were not described
+- Match the exact visual style of these samples (photograph/illustration/minimalist/infographic)
+- If samples show bar charts, include bar charts; if they show lifestyle photography, include lifestyle shots
+- Follow the exact composition and layout patterns described
+
+ANTI-CUTOFF RULES:
+- Ensure all text elements are fully visible within the canvas
+- Do not let headline, body text, CTA, or footer get clipped at edges
+- Maintain proper padding from all sides
+- Keep all visual elements fully contained within the frame
+""".strip()
+    else:
+        print("  ⚠️ No image descriptions found in state!")
+
     merged = f"""
 [MAIN MESSAGE]
 {state.get("prompt_main", "")}
@@ -1874,110 +2324,141 @@ def merge_prompts(state) -> dict:
 [BRAND GUARDRAILS]
 {state.get("prompt_brand", "")}
 
+{visual_content_section}
+
+{typography_section}
+
+[LAYOUT ENFORCEMENT - MANDATORY]
+- Follow the positional layout map extracted from metadata.
+- Keep headline, body, CTA, footer, logo, and subject in the same relative zones as the sample creatives.
+- Preserve the same reading flow and section stacking pattern.
+- Preserve the same text-heavy side and image-heavy side where supported.
+- Preserve safe empty areas for text.
+- Preserve spacing, visual balance, and subject/text separation.
+- Do not reposition major elements unless metadata says the position is unclear.
+
 [FINAL EXECUTION RULES]
 - Maintain brand tone and messaging.
 - Keep layout clean and readable.
 - Avoid cartoon, anime, vector illustration styles.
-- Prefer photorealistic healthcare poster style.
 - Maintain safe margins for all text.
+- Use the typography style exactly as provided in the brand JSON.
 """.strip()
 
-    return {"prompt": merged}
+    db_answers = state.get("db_answers", {})
+    return {"prompt": merged, "db_answers": db_answers}
 
 
-# def generate_prompt(state: GraphState) -> GraphState:
-#     print("🎨 Running Generate Prompt Node...")
+def generate_blog_node(state: GraphState) -> GraphState:
+    print("📝 Running Generate Blog Node...")
+    logger.log_workflow("generate_blog_node")
+    logger.log_api_call("OpenAI Chat", "Generating blog from goal + DB answers")
 
-#     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-#     goal = state.get("goal", "")
+    goal = (state.get("goal") or "").strip()
+    db_answers = state.get("db_answers") or {}
+    merged_prompt = (state.get("prompt") or "").strip()
 
-#     def flatten_results(results):
-#         if isinstance(results, list):
-#             return "\n".join(
-#                 [
-#                     r.get("content", "") if isinstance(r, dict) else str(r)
-#                     for r in results
-#                 ]
-#             )
+    if not goal:
+        raise ValueError("Missing 'goal' in state for blog generation.")
 
-#         return str(results)
+    if not db_answers:
+        print("  ⚠️ No db_answers in state, loading from chat_node output...")
+        chat_output_path = "db_answers.json"
+        if os.path.exists(chat_output_path):
+            try:
+                with open(chat_output_path, "r", encoding="utf-8") as f:
+                    db_answers = json.load(f)
+                print(f"  ✅ Loaded db_answers from {chat_output_path}")
+            except Exception as e:
+                print(f"  ⚠️ Error loading db_answers: {e}")
 
-#     retrieved_main = flatten_results(state.get("retrieved_docs", {}).get("main", []))
-#     retrieved_metadata = flatten_results(state.get("retrieved_docs_metadata", []))
-#     retrieved_strategy = flatten_results(state.get("retrieved_docs_strategy", []))
-#     retrieved_brand = flatten_results(state.get("retrieved_docs_brand", []))
+    answers_text = "\n\n".join(
+        [
+            f"{db_name.upper()} ANSWER:\n{answer}"
+            for db_name, answer in db_answers.items()
+            if answer and str(answer).strip()
+        ]
+    )
 
-#     context = f"""
-#     MAIN CONTENT:
-#     {retrieved_main}
+    system_msg = """
+    You are a senior content strategist.
 
-#     METADATA DESIGN:
-#     {retrieved_metadata}
+    Write:
+    1. a concise, brand-aligned blog
+    2. a compact blog summary
 
-#     STRATEGY:
-#     {retrieved_strategy}
+    Rules:
+    - Use only the campaign goal, DB answers, and merged prompt guidance
+    - Do not use external knowledge
+    - Do not invent unsupported claims
+    - The blog summary must be under 100 words
+    - The blog summary must contain only the most important words, phrases, and ideas from the blog
+    - Keep the summary dense, clear, and useful for future reuse
+    """
 
-#     BRAND:
-#     {retrieved_brand}
-#     """
-#     feedback = state.get("user_feedback", "")
-#     # goal = (state.get("goal", "") or "").strip()
+    user_msg = f"""
+    GOAL:
+    {goal}
 
-#     system_msg = """
+    ANSWERS FROM ALL DBS:
+    {answers_text}
 
-#     You are a senior enterprise visual director and DALL-E 3 production prompt engineer.
-#     You generate ultra-detailed, layout-controlled, brand-consistent image prompts
-#     for enterprise LinkedIn marketing templates.
+    MERGED PROMPT GUIDANCE:
+    {merged_prompt}
 
-#     CRITICAL RULES:
-#     1. You MUST translate brand + metadata + strategy into precise visual composition.
-#     2. Specify spatial hierarchy (top / mid / bottom / left / right).
-#     3. Define background style and depth.
-#     4. Define text block placement.
-#     5. Define CTA placement.
-#     6. Define color ratios (percentage usage).
-#     7. Define typography style description (modern sans serif, bold geometric, etc.).
-#     8. Define visual tone (minimal, premium, tech-forward, corporate).
-#     9. No generic marketing fluff.
-#     10. Output ONLY one final DALL-E optimized prompt paragraph.
-#     11. Do NOT output explanations.
-#     """
+    Return EXACTLY this format. Do NOT repeat sections:
 
-#     user_content = f"""
+    BLOG:
+    <content>
 
-#         PRIMARY USER GOAL (HIGHEST PRIORITY - MUST FOLLOW EXACTLY):
-#         {goal}
-#         Using the following structured enterprise brand intelligence,
-#         generate a production-grade DALL-E 3 prompt for a 1024x1024 poster carousel slide.
+    BLOG SUMMARY:
+    - EXACTLY 2 lines
+    - Line 1: catchy, engaging hook sentence (human-friendly)
+    - Line 2: keyword-dense summary (important words, phrases for reuse)
+    - No repetition
+    - No bullet points
+    """
 
-#         CONTEXT:
-#         {context}
-#         CRITICAL REQUIREMENTS:
-#         - The visual must strictly reflect brand palette hierarchy
-#         - Background must follow dominant color pattern from metadata DB.
-#         - Text colors must respect contrast rules from metadata DB.
-#         - Layout structure must follow observed layout style patterns.
-#         - CTA placement must follow strategy DB.
-#         - Tone must match brand emotional intensity.
-#         - Typography must follow brand guardrails.
-#         - Composition must be spatially defined (top/middle/bottom zones).
-#         - Output must be a single ultra-detailed rendering prompt paragraph.
-#         Only output the final DALL-E ready prompt.
-#         """
-#     if feedback:
-#         # user_content += f"\n\nModify previous concept according to this feedback: {feedback}"
-#         user_content += f"\n\nApply this feedback exactly: {feedback}"
-#     response = client.chat.completions.create(
-#         model="gpt-4o-mini",
-#         temperature=0.2,
-#         messages=[
-#             {"role": "system", "content": system_msg},
-#             {"role": "user", "content": user_content},
-#         ],
-#     )
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        temperature=0.3,
+        messages=[
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_msg},
+        ],
+    )
 
-#     state["prompt"] = response.choices[0].message.content.strip()
-#     return state
+    full_output = response.choices[0].message.content.strip()
+
+    blog_text = full_output
+    blog_summary_text = ""
+
+    if "BLOG SUMMARY:" in full_output:
+        parts = full_output.split("BLOG SUMMARY:", 1)
+        blog_text = parts[0].strip()
+        blog_summary_text = parts[1].strip()
+
+        words = blog_summary_text.split()
+        line1 = " ".join(words[:15])
+        line2 = " ".join(words[15:30])
+
+        blog_summary_text = f"{line1}\n{line2}"
+
+    if blog_text.startswith("BLOG:"):
+        blog_text = blog_text[len("BLOG:"):].strip()
+
+
+    print("\n📝 GENERATED BLOG:\n")
+    print(blog_text)
+
+    print("\n🧾 BLOG SUMMARY:\n")
+    print(blog_summary_text)
+
+    return {
+        "blog_text": blog_text,
+        "blog_summary": blog_summary_text
+    }
 
 
 # -----------------------------------------------------------------------
@@ -2024,7 +2505,7 @@ def get_model_output_path(
     model_name: str, prefix: str = "image", ext: str = "png"
 ) -> str:
     safe_model_name = re.sub(r"[^a-zA-Z0-9._-]", "_", model_name.strip())
-    model_dir = os.path.join("samples_1", safe_model_name)
+    model_dir = os.path.join("samples_4", safe_model_name)
     os.makedirs(model_dir, exist_ok=True)
 
     filename = f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{ext}"
@@ -2056,7 +2537,7 @@ from openai import OpenAI
 #     response = client.images.generate(
 #         model=model_name,
 #         prompt=prompt,
-#         size="1024x1024",
+#         size="1024x1792",
 #         n=1,
 #         quality="high",
 #     )
@@ -2100,28 +2581,102 @@ def generate_image(state: GraphState) -> GraphState:
             "Missing 'prompt' in state. generate_prompt must run before generate_image."
         )
 
+    brand_data = state.get("brand_data", {})
+    typography_info = ""
+    text_style = ""
+
+    if brand_data:
+        typography = brand_data.get("Typography", {})
+        if typography:
+            text_style = typography.get("Text_style", "")
+
+    if not text_style:
+        jiraaf_path = "Jiraaf_data.json"
+        if os.path.exists(jiraaf_path):
+            try:
+                with open(jiraaf_path, "r", encoding="utf-8") as f:
+                    jiraaf_data = json.load(f)
+                typography = jiraaf_data.get("Typography", {})
+                if typography:
+                    text_style = typography.get("Text_style", "")
+            except Exception as e:
+                print(f"  ⚠️ Error reading Jiraaf_data.json for typography: {e}")
+
+    if text_style:
+        typography_info = f"""
+CRITICAL TYPOGRAPHY REQUIREMENTS - STRICTLY ENFORCE:
+- Typography style from brand JSON: {text_style}
+- Use this exact typography style for every text element in the image
+- This includes headline, subheadline, body text, CTA, footer text, and numerals
+- Do not replace this typography style with any other style
+- Keep all text visually consistent with this exact typography style
+""".strip()
+
+        print(f"  🔤 Font style enforced from JSON: {text_style}")
+
+    goal = state.get("goal", "")
+    blog_summary = (state.get("blog_summary") or "").strip()
+    goal_guardrail = ""
+    if goal:
+        goal_guardrail = f"""
+CAMPAIGN GOAL GUARDRAIL - STRICTLY ENFORCE:
+- The generated image MUST directly serve this specific goal: {goal}
+- Every visual element, message, text, and design choice must align with and support this goal.
+- The central focus of the image should be about: {goal}
+- If the goal mentions a specific country, region, brand, product, feature, or campaign theme, it MUST be visually represented in the image.
+- For example: if goal mentions "India", include Indian flag or Indian cultural elements; if goal mentions "GDP", show GDP-related visual elements.
+- Do not generate generic imagery - every element must tie back to the goal.
+- Include relevant national symbols, cultural elements, or brand identifiers mentioned in the goal.
+
+STRICT ANTI-HALLUCINATION RULES:
+- ONLY include visual elements that are explicitly described in the sample creative descriptions provided
+- DO NOT invent, assume, or add any graphics, icons, charts, or elements NOT mentioned in the sample descriptions
+- DO NOT hallucinate visual content - if it's not in the descriptions, don't add it
+- The image must serve the goal while following the sample style exactly
+""".strip()
+
     realism_guardrail = """
 IMPORTANT VISUAL RULES:
 - Create a photorealistic image.
 - Do not make it cartoon, anime, vector art, flat illustration, 3D cartoon, or digital painting.
-- Use realistic human facial proportions, natural skin texture, realistic lighting, and real photographic depth.
-- Keep the result clean and premium, like a real healthcare campaign poster.
+- Use realistic lighting and premium composition.
 """.strip()
 
     layout_guardrail = """
 LAYOUT RULES:
-- Design this as a square poster with generous safe margins.
+- Follow the positional layout map from the prompt exactly where available.
+- Preserve the same relative placement pattern as the sample creatives.
 - Keep all text fully visible inside the canvas.
-- Leave enough padding from every edge, especially the top edge.
-- Do not let the headline touch, cross, or get clipped by the top border.
-- Keep the headline in the upper-left area with breathing room.
-- Reserve the left side primarily for text and the right side for the subject.
-- Keep body text shorter and well spaced.
-- Ensure CTA button is fully visible and not too close to the bottom edge.
+- Leave enough padding from every edge.
+- Do not let the headline touch or get clipped by the top border.
+- Preserve the same reading flow as the sample layout.
 - Maintain clean visual hierarchy: headline, supporting text, CTA, logo.
+- Maintain safe margins on all sides.
 """.strip()
 
-    prompt = f"{base_prompt}\n\n{realism_guardrail}\n\n{layout_guardrail}"
+    visual_content_guardrail = """
+VISUAL CONTENT REQUIREMENTS - CRITICAL:
+- Include similar types of visual content, graphs, charts, icons, or visual elements as shown in the reference creative descriptions.
+- If the samples contain infographics or data visualizations, include appropriate charts/graphs.
+- Match the overall visual style (photograph vs illustration, minimalist vs detailed) of the sample creatives.
+- Include similar decorative elements, icons, or graphical elements as seen in the reference images.
+""".strip()
+
+    prompt_parts = [base_prompt]
+    if typography_info:
+        prompt_parts.append(typography_info)
+    if goal_guardrail:
+        prompt_parts.append(goal_guardrail)
+    prompt_parts.append(realism_guardrail)
+    prompt_parts.append(layout_guardrail)
+    prompt_parts.append(visual_content_guardrail)
+    if blog_summary:
+        blog_summary_guardrail = f"""BLOG SUMMARY TO DISPLAY ON IMAGE:
+Include this text visibly in the image as the main caption or body copy:
+\"{blog_summary}\"
+Render it clearly, legibly, and styled to match the brand typography."""
+        prompt_parts.append(blog_summary_guardrail)
+    prompt = "\n\n".join(prompt_parts)
 
     model_name = state.get("image_model") or "gpt-image-1-mini"
 
@@ -2329,6 +2884,7 @@ def create_all_vector_stores(state: GraphState) -> GraphState:
     file_metadata = state.get("file_metadata", [])
     metadata_docs = state.get("metadata_docs", [])
     strategy_docs = state.get("strategy_docs", [])
+    image_descriptions = state.get("image_descriptions", {})
 
     embedder = OpenAIEmbeddings(model="text-embedding-ada-002")
     processor = EmbeddingProcessor(model="text-embedding-ada-002")
@@ -2591,6 +3147,15 @@ def create_all_vector_stores(state: GraphState) -> GraphState:
                     metadata_str = f"Filename: {file_name}\n"
                     metadata_inputs.append(metadata_str)
 
+        if image_descriptions:
+            print(
+                f"    🖼 Adding {len(image_descriptions)} image descriptions to metadata index..."
+            )
+            for img_path, description in image_descriptions.items():
+                img_name = os.path.basename(img_path)
+                desc_str = f"Image: {img_name}\nImage Description: {description}"
+                metadata_inputs.append(desc_str)
+
         if metadata_inputs:
             metadata_embeddings = processor.generate_embeddings(metadata_inputs)
             print(f"    📊 Created {len(metadata_embeddings)} metadata embeddings")
@@ -2623,7 +3188,7 @@ def create_all_vector_stores(state: GraphState) -> GraphState:
             )
 
     # Build brand FAISS index from brand_data.json
-    brand_data_path = "Niroggi_data.json"
+    brand_data_path = "Jiraaf_data.json"
     if os.path.exists(brand_data_path):
         print("  📂 Building brand index...")
         try:
@@ -2641,7 +3206,7 @@ def create_all_vector_stores(state: GraphState) -> GraphState:
         except Exception as e:
             print(f"    ⚠️ Error building brand index: {e}")
 
-    return state
+    return {**state, "image_descriptions": image_descriptions}
 
 
 def parse_brand_text_to_dict(text: str) -> dict:
@@ -2715,7 +3280,7 @@ def generate_prompt_from_faiss(state: GraphState) -> GraphState:
     # Add generated prompt to state for later use
     # state["generated_prompt"] = prompt
     # return state
-    return {**state, "generated_prompt": prompt}
+    return {"generated_prompt": prompt}
 
 
 workflow = StateGraph(GraphState)
@@ -2726,6 +3291,7 @@ workflow.add_node("filter_files", filter_files_to_ocr)
 workflow.add_node("ocr", ocr_node)
 workflow.add_node("split_by_type", split_by_type_node)
 workflow.add_node("image_analyzer", image_analyzer_node)
+workflow.add_node("generate_image_descriptions", generate_image_descriptions_node)
 workflow.add_node("text_split", text_splitter_node)
 workflow.add_node("embeddings", embeddings_node)
 workflow.add_node("create_all_vector_stores", create_all_vector_stores)
@@ -2740,6 +3306,7 @@ workflow.add_node("generate_prompt_metadata", generate_prompt_metadata)
 workflow.add_node("generate_prompt_strategy", generate_prompt_strategy)
 workflow.add_node("generate_prompt_brand", generate_prompt_brand)
 workflow.add_node("merge_prompts", merge_prompts)
+workflow.add_node("generate_blog", generate_blog_node)
 workflow.add_node("generate_image", generate_image)
 workflow.add_node("image_feedback", image_feedback)
 workflow.add_node("edit_image", edit_image)
@@ -2755,13 +3322,15 @@ workflow.add_conditional_edges(
 )
 workflow.add_edge("filter_files", "ocr")
 workflow.add_edge("ocr", "split_by_type")
-# Fan-out: text_split feeds embeddings; image_analyzer runs in parallel.
-# Both then synchronise into create_all_vector_stores.
+# Fan-out: text_split and image_analyzer run in parallel (both produce inputs for embeddings)
+# Run text_split and image_analyzer in parallel BEFORE embeddings
 workflow.add_edge("split_by_type", "text_split")
 workflow.add_edge("split_by_type", "image_analyzer")
+# image_analyzer -> generate_image_descriptions -> embeddings
+workflow.add_edge("image_analyzer", "generate_image_descriptions")
+# Both text_split and generate_image_descriptions feed into embeddings
 workflow.add_edge("text_split", "embeddings")
-# image_analyzer result flows directly into create_all_vector_stores (images already collected).
-workflow.add_edge("image_analyzer", "embeddings")
+workflow.add_edge("generate_image_descriptions", "embeddings")
 workflow.add_edge("embeddings", "create_all_vector_stores")
 workflow.add_edge("create_all_vector_stores", "generate_prompt_from_faiss")
 workflow.add_edge("generate_prompt_from_faiss", "load_brand_data")
@@ -2783,7 +3352,8 @@ workflow.add_edge(
     ],
     "merge_prompts",
 )
-workflow.add_edge("merge_prompts", "generate_image")
+workflow.add_edge("merge_prompts", "generate_blog")
+workflow.add_edge("generate_blog", "generate_image")
 workflow.add_edge("generate_image", "image_feedback")
 
 workflow.add_conditional_edges(
@@ -2801,24 +3371,42 @@ app = workflow.compile()
 result = app.invoke(
     {
         "brand_assets_files": [
-            "LOGO_Niroggi_LOGO PURPLE.png",
-            # "LOGO_Niroggi_LOGO ON WHITE.png",
-            # "LOGO_Niroggi_LOGO WHITE.png"
+            "Screenshot 2026-03-16 at 9.11.35 PM.png",
         ],
         "creatives_files": [
-            "CAROUSEL-Niroggi-1.jpg",
-            # "CAROUSEL-Niroggi-2.jpg",
-            # "CAROUSEL-Niroggi-3.jpg",
-            # "CAROUSEL-Niroggi-4.jpg",
-            # "CAROUSEL-Niroggi-5.jpg"
-            # "CAROUSEL-Niroggi-6.jpg",
-            # "CAROUSEL-Niroggi-7.jpg",
-            # "CAROUSEL-Niroggi-8.jpg",
-            # "CAROUSEL-Niroggi-9.jpg"
+            "Countries Inflation Rate (1).png",
+            "GDP growth-01 (1).png",
+            "foreign-01 (1).png",
+            "Quick commerce (1).png",
+            "FD to bonds-01.pngFD to bonds-02.png",
+            "FD to bonds-03.png",
+            "FD to bonds-04.png",
+            "FD to bonds-05.png",
+            "FD to bonds-06.png",
+            "FD to bonds-07.png",
+            "FD to bonds-08.png",
+            "FD to bonds-09.png",
         ],
         "strategy_decks_files": [
-            "Niroggi - Brand Strategy Routes.pptx",
+            "Jiraaf & Altgraaf Pitch - Red & Blue Digital.pptx",
         ],
+        # "brand_assets_files": [
+        #     "LOGO_Niroggi_LOGO ON WHITE.png",
+        #     "LOGO_Niroggi_LOGO WHITE.png"
+        # ],
+        # "creatives_files": [
+        #     "CAROUSEL-Niroggi-2.jpg",
+        #     "CAROUSEL-Niroggi-3.jpg",
+        #     "CAROUSEL-Niroggi-4.jpg",
+        #     "CAROUSEL-Niroggi-5.jpg"
+        #     "CAROUSEL-Niroggi-6.jpg",
+        #     "CAROUSEL-Niroggi-7.jpg",
+        #     "CAROUSEL-Niroggi-8.jpg",
+        #     "CAROUSEL-Niroggi-9.jpg",
+        # ],
+        # "strategy_decks_files": [
+        #     "Niroggi - Brand Strategy Routes.pptx",
+        # ],
         # # 1️⃣ Screen Time Awareness
         # "goal": """
         # Create an Instagram carousel encouraging parents to swap kids’ screen time with real-world activities.
@@ -2843,39 +3431,45 @@ result = app.invoke(
         #     "goal": """
         #    Create an Instagram carousel encouraging families to replace digital time with real-world moments.
         #     """,
-        "goal": """
-        Create an Instagram carousel encouraging mindful eating habits for children.
-        """,
+        # "goal": """
+        # Create an Instagram carousel encouraging mindful eating habits for children.
+        # """,
+        # "goal": """
+        # create a instagram post for
+        # How Tariff are increasing costs for everyday goods
+        # """,
         # ___________________________________________________________________
         # "goal": """
         # Create a carousel slide explaining the importance of balancing physical activity with mental wellness.
         # Use this as slide 2 in a wellness education series.
         # Format it as a social media carousel slide for Instagram
         # """,
-        # "goal": """
-        # """,
+        "goal": """
+        Create a linkedin post with a horizontal bar chart comparing current vs projected quick commerce market sizes across countries.
+        """,
         "question": """        
-        Return:
-        1) Primary theme (1 sentence)
-        2) 4–6 supporting sections (each: headline + 1–2 lines)
-        3) 5 enterprise pain points caused by neglecting security
-        4) 5 practical recommendations (actionable, enterprise-ready)
-        5) A Niroggi-style CTA line
+        From the provided brand content, extract:
+        1) Primary theme and message direction
+        2) Key brand messaging and positioning
+        3) Target audience characteristics
+        4) Campaign themes and concepts
+        5) Communication style and tone guidelines
         
-        and answer this 
-        What is the tone of the brand for Niroggi?
+        Focus on: brand identity, messaging strategy, audience insights from the Jiraaf brand materials.
         """,
         "question_metadata": """
-        From the provided Niroggi creatives (images/PDFs), extract ONLY what is visibly present.
- 
+        From the provided Jiraaf creative samples (images/PDFs), extract ONLY what is visibly present.
+  
         Return:
         1) Top 5 dominant background colors (hex where possible) + brief usage note
         2) Top 3 text colors used (hex where possible)
         3) Accent color suggestions consistent with the creatives (hex where possible)
-        4) Key visual labels/themes detected (e.g., icons, shapes, objects, motifs)
-        5) Layout patterns observed (e.g., minimal, split layout, gradient, cards, timeline, circular mask)
+        4) Key visual labels/themes detected (e.g., icons, shapes, objects, motifs, charts, graphs)
+        5) Layout patterns observed (e.g., minimal, split layout, gradient, cards, timeline, bar charts)
         6) Typography hints (headline vs body style, weight, spacing, casing) — if unclear, say MISSING
-        Rules: Do not guess. If not present, return MISSING.
+        7) Visual content descriptions (what graphs, charts, people, objects are shown)
+        
+        Rules: Do not guess. If not present, return MISSING. Focus on what makes the visual unique.
         """,
         "question_strategy": """
         You are a senior brand strategist for {Brand_Name}. Your task is to retrieve and synthesize a comprehensive communication strategy from the brand knowledge base using ONLY the brand context provided below.
@@ -2943,18 +3537,20 @@ result = app.invoke(
         """,
         "question_brand": """
         Build {Brand_Name} brand guardrails STRICTLY from the provided {Brand_Name} assets. Do not use external knowledge. If any item is not explicitly supported by the assets, write MISSING (do not hallucinate).
- 
+
         Return:
         1) Brand essence + audience (primary/secondary)
         2) Tone keywords + avoid list
         3) Visual style direction (photo vs illustration, minimal vs maximal, modern vs classic)
         4) Color palette with usage rules (primary/secondary/accent + contrast guidance)
         5) Typography hierarchy rules (headline/body/caption) — include font names only if present; otherwise MISSING
-        6) Layout system rules (alignment, grid, whitespace, corner radius, icon style)
-        7) Mandatory brand assets rules (logo variants, safe area, watermark usage)
-        8) Offer/content rules (hero message, CTA, any pricing/offer patterns if present)
-        9) Do / Don’t guardrails (emotional + visual + copy)
-        10) Recommended template types (3–6) with one rule each (e.g., cover slide, stats slide, checklist slide, quote slide)
+        6) Layout system rules (alignment, grid, whitespace, section stacking, reading flow)
+        7) Logo placement and safe area rules
+        8) CTA placement preference and treatment
+        9) Footer structure rules
+        10) Offer/content rules (hero message, CTA, any pricing/offer patterns if present)
+        11) Do / Don’t guardrails (emotional + visual + copy + layout)
+        12) Recommended template types (3–6) with one rule each
         """,
         "documents": [],
         "chunks": [],
@@ -2976,12 +3572,15 @@ result = app.invoke(
         "saved_image_path": "",  # FIX: required by GraphState
         "brand_data": {},  # FIX: populated by load_brand_data_node
         "image_model": "gpt-image-1-mini",
+        "blog_summary": "", 
     }
 )
 
 
 print("\n🎯 Final Generated Image Path:")
 print(result.get("saved_image_path"))
+print("\n📝 Final Generated Blog:")
+print(result.get("blog_text", ""))
 
 
 # Print retrieved results cleanly
