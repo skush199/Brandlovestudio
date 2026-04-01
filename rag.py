@@ -208,10 +208,13 @@ class GraphState(TypedDict):
     question_metadata: Annotated[str, lambda x, y: y]
     question_strategy: Annotated[str, lambda x, y: y]
     question_brand: Annotated[str, lambda x, y: y]
-    generation: NotRequired[str]  # written by chat_node
+    # generation: NotRequired[str]  # written by chat_node
+    generation: Annotated[str, lambda x, y: y] 
     db_answers: Annotated[Dict[str, str], dict_merge]
-    blog_text: NotRequired[str]
-    blog_summary: NotRequired[str]
+    # blog_text: NotRequired[str]
+    blog_text: Annotated[str, lambda x, y: y]
+    # blog_summary: NotRequired[str]
+    blog_summary: Annotated[str, lambda x, y: y]
     documents: Annotated[List[Dict], lambda x, y: y]
     # chunks: List[str]
     chunks: Annotated[List[str], add]
@@ -229,22 +232,25 @@ class GraphState(TypedDict):
     retrieved_docs_strategy: Annotated[List[Dict], list_merge]
     retrieved_docs_brand: Annotated[List[Dict], list_merge]
     file_metadata: Annotated[List[Dict], list_merge]
-    target_db: str
-    metadata_docs: List[Dict]
-    strategy_docs: List[Dict]
-    files_to_ocr: List[str]  # Only files that need OCR (filtered from file_paths)
+    # target_db: str
+    target_db: Annotated[str, lambda x, y: y]
+    # metadata_docs: List[Dict]
+    metadata_docs: Annotated[List[Dict], list_merge]
+    # strategy_docs: List[Dict]
+    strategy_docs: Annotated[List[Dict], list_merge]
+    files_to_ocr: Annotated[List[str], add]
     # --- image generation loop state ---
-    prompt: str
-    user_feedback: str
-    saved_image_path: str
-    goal: str
-    image_model: str
-    brand_data: NotRequired[Dict]
+    prompt: Annotated[str, lambda x, y: y]
+    user_feedback: Annotated[str, lambda x, y: y]
+    saved_image_path: Annotated[str, lambda x, y: y]
+    goal: Annotated[str, lambda x, y: y]
+    image_model: Annotated[str, lambda x, y: y]
+    brand_data: Annotated[Dict, dict_merge]
     # --- intermediate prompt outputs (parallel nodes write these) ---
-    prompt_main: NotRequired[str]
-    prompt_metadata: NotRequired[str]
-    prompt_strategy: NotRequired[str]
-    prompt_brand: NotRequired[str]
+    prompt_main: Annotated[str, lambda x, y: y]
+    prompt_metadata: Annotated[str, lambda x, y: y]
+    prompt_strategy: Annotated[str, lambda x, y: y]
+    prompt_brand: Annotated[str, lambda x, y: y]
     # --- image descriptions from GPT-4o vision ---
     image_descriptions: Annotated[Dict[str, str], dict_merge]
 
@@ -2446,8 +2452,7 @@ def generate_blog_node(state: GraphState) -> GraphState:
         blog_summary_text = f"{line1}\n{line2}"
 
     if blog_text.startswith("BLOG:"):
-        blog_text = blog_text[len("BLOG:"):].strip()
-
+        blog_text = blog_text[len("BLOG:") :].strip()
 
     print("\n📝 GENERATED BLOG:\n")
     print(blog_text)
@@ -2455,10 +2460,7 @@ def generate_blog_node(state: GraphState) -> GraphState:
     print("\n🧾 BLOG SUMMARY:\n")
     print(blog_summary_text)
 
-    return {
-        "blog_text": blog_text,
-        "blog_summary": blog_summary_text
-    }
+    return {"blog_text": blog_text, "blog_summary": blog_summary_text}
 
 
 # -----------------------------------------------------------------------
@@ -3375,18 +3377,18 @@ result = app.invoke(
         ],
         "creatives_files": [
             "Countries Inflation Rate (1).png",
-            "GDP growth-01 (1).png",
-            "foreign-01 (1).png",
-            "Quick commerce (1).png",
-            "FD to bonds-01.png",
-            "FD to bonds-02.png",
-            "FD to bonds-03.png",
-            "FD to bonds-04.png",
-            "FD to bonds-05.png",
-            "FD to bonds-06.png",
-            "FD to bonds-07.png",
-            "FD to bonds-08.png",
-            "FD to bonds-09.png",
+            # "GDP growth-01 (1).png",
+            # "foreign-01 (1).png",
+            # "Quick commerce (1).png",
+            # "FD to bonds-01.png",
+            # "FD to bonds-02.png",
+            # "FD to bonds-03.png",
+            # "FD to bonds-04.png",
+            # "FD to bonds-05.png",
+            # "FD to bonds-06.png",
+            # "FD to bonds-07.png",
+            # "FD to bonds-08.png",
+            # "FD to bonds-09.png",
         ],
         "strategy_decks_files": [
             "Jiraaf & Altgraaf Pitch - Red & Blue Digital.pptx",
@@ -3473,68 +3475,22 @@ result = app.invoke(
         Rules: Do not guess. If not present, return MISSING. Focus on what makes the visual unique.
         """,
         "question_strategy": """
-        You are a senior brand strategist for {Brand_Name}. Your task is to retrieve and synthesize a comprehensive communication strategy from the brand knowledge base using ONLY the brand context provided below.
-        ---
+       Return the brand context in a detailed paragraph format for marketing content creation.
 
-        ## BRAND CONTEXT
+        Include:
+        - brand identity and positioning
+        - brand tone and voice
+        - brand personality traits
+        - target audience persona (including behaviors, motivations, and pain points)
+        - communication style and content approach
+        - messaging themes and strategic focus
+        - visual identity and design consistency
+        - platform-specific content behavior (Instagram, LinkedIn, YouTube)
+        - brand guidelines and guardrails (including compliance if any)
+        - marketing and content objectives
 
-        {Brand_Name} is a brand operating with the mission of {Brand_Mission} and a long-term vision of {Brand_Vision}. The brand promises its customers {Brand_Promise} and is positioned in the market as {Market_Positioning}, standing apart through its key differentiators: {Key_Differentiators}. The brand primarily serves a {Audience_Type} audience, with the persona playing the role of {Persona_Role}, driven by goals such as {Persona_Goals} and facing pain points including {Fear_And_Pain_Points}. The current strategic goal guiding this retrieval is {goal}. In all communications, the brand must lead with the emotion of {Primary_Emotion} and must strictly avoid evoking {Avoided_Emotion}. The brand always follows these behavioral principles — {What_To_Do} — and must never engage in the following — {What_Not_To_Do}.
-
-        ---
-
-        ## RETRIEVAL RULES
-
-        1. Retrieve ALL strategy elements strictly aligned with the brand context above.
-        2. Every output field MUST reflect the primary_emotion: {Primary_Emotion} in tone and framing.
-        3. NEVER include content that triggers the avoided_emotion: {Avoided_Emotion}.
-        4. All retrieved content MUST serve the goal: {goal} and align with brand_mission: {Brand_Mission}.
-        5. Apply what_to_do: {What_To_Do} as behavioral guardrails — follow these always.
-        6. Apply what_not_to_do: {What_Not_To_Do} as hard restrictions — never violate these.
-        7. If information for any field is unavailable in the knowledge base or context, return exactly: "MISSING"
-
-        ---
-
-        ## OUTPUT FIELDS TO RETRIEVE
-
-        Using the brand context above as your foundation, retrieve and return ONLY the following 10 fields:
-
-        1. **Key Challenges**
-        What are the major obstacles in the industry/market? What does {Brand_Name} face?
-
-        2. **Environmental Influences**
-        What external factors are impacting {Brand_Name} or its target audience?
-
-        3. **Target Audience / Target Consumers**
-        Who are we speaking to? What are their characteristics, needs, and motivations?
-
-        4. **Solutions Personalizer**
-        How does {Brand_Name} personalize its approach or offering to meet individual needs?
-
-        5. **Solutions Humanizer**
-        What human elements (empathy, connection) are integrated into {Brand_Name}'s solutions?
-
-        6. **Brand Offers**
-        What does {Brand_Name} offer to its customers? What is its core value proposition?
-
-        7. **Brand Strategy**
-        What is the overarching brand strategy, including goals, vision, and mission?
-
-        8. **Brand Position**
-        How is {Brand_Name} positioned in the market relative to competitors?
-
-        9. **Target Options**
-        What are the target segments or growth opportunities identified for {Brand_Name}?
-
-        10. **Challenges**
-            What are the internal and external challenges identified for {Brand_Name}?
-
-        ---
-
-        ## OUTPUT FORMAT
-
-        Return ONLY the 10 fields above. No preamble. No explanation. No extra commentary.
-        If a field cannot be derived from the provided context or knowledge base, return "MISSING" for that field.
-
+        Write it as a same as points ( bullet points, not JSON).
+        Only use information from the document. Do not hallucinate. If something is missing, skip it. give as same the keywords
         """,
         "question_brand": """
         Build {Brand_Name} brand guardrails STRICTLY from the provided {Brand_Name} assets. Do not use external knowledge. If any item is not explicitly supported by the assets, write MISSING (do not hallucinate).
@@ -3573,7 +3529,7 @@ result = app.invoke(
         "saved_image_path": "",  # FIX: required by GraphState
         "brand_data": {},  # FIX: populated by load_brand_data_node
         "image_model": "gpt-image-1-mini",
-        "blog_summary": "", 
+        "blog_summary": "",
     }
 )
 
