@@ -998,7 +998,7 @@ def embeddings_node(state: GraphState) -> GraphState:
     brand_data_path = None
 
     if target_db in ["brand", "main"]:
-        brand_data_path = "brand_jiraaf.json"
+        brand_data_path = "brand.json"
     elif target_db == "faiss":
         brand_data_path = "Jiraaf_data.json"
 
@@ -1207,10 +1207,10 @@ def load_brand_data_node(state: GraphState) -> GraphState:
 
     brand_data = {}
 
-    if os.path.exists("brand_jiraaf.json"):
-        with open("brand_jiraaf.json", "r", encoding="utf-8") as f:
+    if os.path.exists("brand.json"):
+        with open("brand.json", "r", encoding="utf-8") as f:
             brand_data = json.load(f)
-        print("  ✅ Loaded from brand_jiraaf.json")
+        print("  ✅ Loaded from brand.json")
     elif os.path.exists("Jiraaf_data.json"):
         with open("Jiraaf_data.json", "r", encoding="utf-8") as f:
             brand_data = json.load(f)
@@ -3378,7 +3378,8 @@ result = app.invoke(
             "GDP growth-01 (1).png",
             "foreign-01 (1).png",
             "Quick commerce (1).png",
-            "FD to bonds-01.pngFD to bonds-02.png",
+            "FD to bonds-01.png",
+            "FD to bonds-02.png",
             "FD to bonds-03.png",
             "FD to bonds-04.png",
             "FD to bonds-05.png",
