@@ -1325,27 +1325,50 @@ def multi_retriever_node(state: GraphState) -> GraphState:
 
     question_main = state.get("question", "")
     question_metadata = state.get("question_metadata", "")
-    # question_strategy = state.get("question_strategy", "")
-    question_strategy = state.get("strategy_question_filled") or state.get(
-        "question_strategy", ""
-    )
-    question_strategy_template = state.get("question_strategy", "")
+    question_brand = state.get("question_brand", "")
 
-    question_strategy = build_strategy_prompt(
-        template=question_strategy_template,
+    brand_name_raw = (
+        state.get("brand_name")
+        or state.get("brand_data", {}).get("Brand_Name")
+        or ""
+    )
+    if isinstance(brand_name_raw, list):
+        brand_name = brand_name_raw[0] if brand_name_raw else ""
+    else:
+        brand_name = str(brand_name_raw).strip()
+
+    question_strategy_template = state.get("question_strategy", "").strip()
+
+    # Dynamic but focused semantic retrieval query
+    strategy_focus = (
+        "brand identity tone of voice personality traits target audience "
+        "communication style platform strategy content approach messaging themes "
+        "brand guardrails compliance restrictions marketing objectives"
+    )
+
+    question_strategy = (
+        f"{brand_name} {question_strategy_template} {strategy_focus}".strip()
+        if question_strategy_template
+        else f"{brand_name} {strategy_focus}".strip()
+    )
+
+    # Full filled prompt for downstream LLM step
+    question_strategy_filled = build_strategy_prompt(
+        template=question_strategy_template or "{Brand_Name} {goal}",
         json_path="Jiraaf_data.json",
         goal=state.get("goal", ""),
     )
-    question_brand = state.get("question_brand", "")
 
-    # Do NOT mutate state directly — write to a local var and save to file only.
     with open("strategy_filled_ip.txt", "w", encoding="utf-8") as f:
-        f.write(question_strategy)
+        f.write("=== RETRIEVAL QUERY ===\n")
+        f.write(question_strategy + "\n\n")
+        f.write("=== FILLED PROMPT ===\n")
+        f.write(question_strategy_filled)
 
     print("✅ Saved filled strategy prompt -> strategy_filled_ip.txt")
 
     embedder = OpenAIEmbeddings(model="text-embedding-ada-002")
-    processor = RetrieverProcessor(k=5)
+    processor = RetrieverProcessor(k=10)
 
     faiss_indexes = {
         "main": ("faiss_index", question_main),
@@ -1371,12 +1394,41 @@ def multi_retriever_node(state: GraphState) -> GraphState:
                 vectorstore = FAISS.load_local(
                     db_path, embedder, allow_dangerous_deserialization=True
                 )
-                docs_and_scores = processor.retrieve(
-                    question=question, vectorstore=vectorstore
-                )
+
+                if db_name == "strategy":
+                    strategy_queries = [
+                        question_strategy,
+                        f"{brand_name} brand identity tone voice personality traits",
+                        f"{brand_name} target audience behavior motivations pain points",
+                        f"{brand_name} positioning differentiation value proposition",
+                        f"{brand_name} social media platform content strategy",
+                        f"{brand_name} brand guardrails compliance dos donts restrictions",
+                        f"{brand_name} marketing content objectives messaging themes",
+                    ]
+
+                    docs_and_scores = []
+                    for q in strategy_queries:
+                        docs_and_scores.extend(
+                            processor.retrieve(question=q, vectorstore=vectorstore)
+                        )
+
+                    # Deduplicate retrieved chunks
+                    seen = set()
+                    deduped_docs_and_scores = []
+                    for doc, score in docs_and_scores:
+                        content = doc.page_content.strip()
+                        if content not in seen:
+                            seen.add(content)
+                            deduped_docs_and_scores.append((doc, score))
+                    docs_and_scores = deduped_docs_and_scores
+                else:
+                    docs_and_scores = processor.retrieve(
+                        question=question, vectorstore=vectorstore
+                    )
 
                 results = []
                 retrieved_strategy_text = []
+
                 for doc, score in docs_and_scores:
                     results.append(
                         {
@@ -1389,20 +1441,31 @@ def multi_retriever_node(state: GraphState) -> GraphState:
                     if db_name == "strategy":
                         retrieved_strategy_text.append(doc.page_content)
 
+                # Brand-specific filtering for strategy DB
+                if db_name == "strategy" and brand_name:
+                    filtered = [
+                        r for r in results
+                        if brand_name.lower() in r["content"].lower()
+                    ]
+                    results = filtered if filtered else results
+                    print(f"  🏷 Brand filter '{brand_name}': {len(results)} chunks kept")
+
                 if db_name == "strategy" and retrieved_strategy_text:
                     with open("strategy_retrived.txt", "w", encoding="utf-8") as f:
                         f.write("\n\n--- CHUNK ---\n\n".join(retrieved_strategy_text))
-
                     print("✅ Saved retrieved strategy chunks -> strategy_retrived.txt")
 
                 all_results[db_name] = results
+
                 if db_name == "metadata":
                     metadata_results = results
                 elif db_name == "strategy":
                     strategy_results = results
                 elif db_name == "brand":
                     brand_results = results
+
                 print(f"📂 Retrieved {len(results)} docs from {db_name} DB")
+
             except Exception as e:
                 print(f"⚠️ Error loading {db_path}: {e}")
                 all_results[db_name] = []
@@ -1411,7 +1474,7 @@ def multi_retriever_node(state: GraphState) -> GraphState:
             all_results[db_name] = []
 
     return {
-        "strategy_question_filled": question_strategy,
+        "strategy_question_filled": question_strategy_filled,
         "retrieved_docs": all_results,
         "retrieved_docs_metadata": metadata_results,
         "retrieved_docs_strategy": strategy_results,
@@ -1482,7 +1545,8 @@ def chat_node(state: GraphState) -> GraphState:
     goal = state.get("goal", "")
     question = state.get("question", "")
     question_metadata = state.get("question_metadata", "")
-    question_strategy = state.get("question_strategy", "")
+    # AFTER (correct — uses the filled version built in multi_retriever_node)
+    question_strategy = state.get("strategy_question_filled") or state.get("question_strategy", "")
     question_brand = state.get("question_brand", "")
     retrieved_docs = state.get("retrieved_docs", {})
 
@@ -1614,9 +1678,14 @@ def _flatten(results) -> str:
 
 
 def _b(brand: dict, key: str) -> str:
-    """Safe brand value lookup — returns 'MISSING' when absent."""
-    return (brand.get(key) or "MISSING").strip()
-
+    val = brand.get(key)
+    if not val:
+        return "MISSING"
+    if isinstance(val, list):
+        val = val[0] if val else "MISSING"
+    if isinstance(val, dict):
+        val = json.dumps(val, ensure_ascii=False)
+    return str(val).strip() or "MISSING"
 
 def _call_openai(system_msg: str, user_content: str) -> str:
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -3475,23 +3544,23 @@ result = app.invoke(
         Rules: Do not guess. If not present, return MISSING. Focus on what makes the visual unique.
         """,
         "question_strategy": """
-       Return the brand context in a detailed paragraph format for marketing content creation.
-
-        Include:
-        - brand identity and positioning
-        - brand tone and voice
-        - brand personality traits
-        - target audience persona (including behaviors, motivations, and pain points)
-        - communication style and content approach
-        - messaging themes and strategic focus
-        - visual identity and design consistency
-        - platform-specific content behavior (Instagram, LinkedIn, YouTube)
-        - brand guidelines and guardrails (including compliance if any)
-        - marketing and content objectives
-
-        Write it as a same as points ( bullet points, not JSON).
-        Only use information from the document. Do not hallucinate. If something is missing, skip it. give as same the keywords
-        """,
+            Return the brand context in a detailed paragraph format for marketing content creation.
+    
+            Include:
+            - brand identity and positioning
+            - brand tone and voice
+            - brand personality traits
+            - target audience persona (including behaviors, motivations, and pain points)
+            - communication style and content approach
+            - messaging themes and strategic focus
+            - visual identity and design consistency
+            - platform-specific content behavior (Instagram, LinkedIn, YouTube)
+            - brand guidelines and guardrails (including compliance if any)
+            - marketing and content objectives
+    
+            Write it as a same as points ( bullet points, not JSON).
+            Only use information from the document. Do not hallucinate. If something is missing, skip it. give as same the keywords
+            """,
         "question_brand": """
         Build {Brand_Name} brand guardrails STRICTLY from the provided {Brand_Name} assets. Do not use external knowledge. If any item is not explicitly supported by the assets, write MISSING (do not hallucinate).
 
