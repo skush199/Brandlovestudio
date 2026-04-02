@@ -914,7 +914,7 @@ def _format_brand_data_for_embedding(brand_data: dict) -> str:
 #     brand_data_path = None
 
 #     if target_db in ["brand", "main"]:
-#         brand_data_path = "brand.json"
+#         brand_data_path = "Jiraaf_data.json"
 #     elif target_db == "niroggi":
 #         brand_data_path = "Niroggi_data.json"
 
@@ -958,7 +958,7 @@ def _format_brand_data_for_embedding(brand_data: dict) -> str:
 #     # Determine the correct FAISS index based on target_db
 #     save_paths = {
 #         "niroggi": "brand_faiss_index",  # Use brand_faiss_index for Niroggi data
-#         "brand": "brand_data_faiss_index",  # Use a new FAISS index for brand.json
+#         "brand": "brand_data_faiss_index",  # Use a new FAISS index for Jiraaf_data.json
 #         "strategy": "strategy_faiss_index",
 #         "metadata": "metadata_faiss_index",
 #     }
@@ -1004,7 +1004,7 @@ def embeddings_node(state: GraphState) -> GraphState:
     brand_data_path = None
 
     if target_db in ["brand", "main"]:
-        brand_data_path = "brand.json"
+        brand_data_path = "Jiraaf_data.json"
     elif target_db == "faiss":
         brand_data_path = "Jiraaf_data.json"
 
@@ -1048,7 +1048,7 @@ def embeddings_node(state: GraphState) -> GraphState:
     # Determine the correct FAISS index based on target_db
     save_paths = {
         "faiss": "brand_faiss_index",  # Use brand_faiss_index for Niroggi data
-        "brand": "brand_data_faiss_index",  # Use a new FAISS index for brand.json
+        "brand": "brand_data_faiss_index",  # Use a new FAISS index for Jiraaf_data.json
         "strategy": "strategy_faiss_index",
         "metadata": "metadata_faiss_index",
     }
@@ -1210,22 +1210,24 @@ def store_brand_data_in_variables(brand_data: dict):
 
 def load_brand_data_node(state: GraphState) -> GraphState:
     print("🏷 Loading Brand Data...")
-
+ 
     brand_data = {}
-
-    if os.path.exists("brand.json"):
-        with open("brand.json", "r", encoding="utf-8") as f:
+ 
+    # Load from Jiraaf_data.json first (has all brand fields)
+    if os.path.exists("Jiraaf_data.json"):
+        with open("Jiraaf_data.json", "r", encoding="utf-8") as f:
             brand_data = json.load(f)
-        print("  ✅ Loaded from brand.json")
+        print("  ✅ Loaded from Jiraaf_data.json")
     elif os.path.exists("Jiraaf_data.json"):
         with open("Jiraaf_data.json", "r", encoding="utf-8") as f:
             brand_data = json.load(f)
         print("  ✅ Loaded from Jiraaf_data.json")
-
+ 
     if brand_data:
         return {**state, "brand_data": brand_data}
-
+ 
     return state
+ 
 
 
 def build_strategy_prompt(template: str, json_path: str, goal: str = ""):
@@ -1801,6 +1803,8 @@ def generate_prompt_main(state) -> dict:
 
     prompt = _call_openai(system_msg, user_content)
 
+    print(f"===============main================================{prompt}")
+
     # Return ONLY the key this node writes — avoids concurrent-write conflict in fan-out
     return {"prompt_main": prompt}
 
@@ -2034,6 +2038,8 @@ Rules:
 
     prompt = _call_openai_visual(system_msg, user_content)
 
+    print(f"====================Metadata prompt========================{prompt}")
+
     # Return ONLY the key this node writes — avoids concurrent-write conflict in fan-out
     return {"prompt_metadata": prompt}
 
@@ -2158,6 +2164,8 @@ def generate_prompt_strategy(state) -> dict:
     )
 
     prompt = _call_openai(system_msg, user_content)
+ 
+    print(f"===========================strategy prompt===================={prompt}")
 
     # Return ONLY the key this node writes — avoids concurrent-write conflict in fan-out
     return {"prompt_strategy": prompt}
@@ -2272,6 +2280,8 @@ def generate_prompt_brand(state) -> dict:
     )
 
     prompt = _call_openai(system_msg, user_content)
+
+    print(f"==========generate brand prompt========={prompt}")
 
     # Return ONLY the key this node writes — avoids concurrent-write conflict in fan-out
     return {"prompt_brand": prompt}
@@ -2421,6 +2431,7 @@ ANTI-CUTOFF RULES:
 """.strip()
 
     db_answers = state.get("db_answers", {})
+    print(f"====================Merge Prompt==================={merged}")
     return {"prompt": merged, "db_answers": db_answers}
 
 
