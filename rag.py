@@ -1213,12 +1213,8 @@ def load_brand_data_node(state: GraphState) -> GraphState:
  
     brand_data = {}
  
-    # Load from Jiraaf_data.json first (has all brand fields)
+    # Load from Jiraaf_data.json (has all brand fields)
     if os.path.exists("Jiraaf_data.json"):
-        with open("Jiraaf_data.json", "r", encoding="utf-8") as f:
-            brand_data = json.load(f)
-        print("  ✅ Loaded from Jiraaf_data.json")
-    elif os.path.exists("Jiraaf_data.json"):
         with open("Jiraaf_data.json", "r", encoding="utf-8") as f:
             brand_data = json.load(f)
         print("  ✅ Loaded from Jiraaf_data.json")
@@ -1680,14 +1676,20 @@ def _flatten(results) -> str:
 
 
 def _b(brand: dict, key: str) -> str:
-    val = brand.get(key)
-    if not val:
-        return "MISSING"
-    if isinstance(val, list):
-        val = val[0] if val else "MISSING"
-    if isinstance(val, dict):
-        val = json.dumps(val, ensure_ascii=False)
-    return str(val).strip() or "MISSING"
+    """Safe brand value lookup — handles list values from JSON and returns {key} when absent."""
+    value = brand.get(key)
+    
+    # Handle list values (JSON stores them as arrays like ["Jiraaf"])
+    if isinstance(value, list):
+        if value:
+            return str(value[0]).strip()
+        return f"{{{key}}}"
+    
+    # Handle None or empty string
+    if value is None or value == "":
+        return f"{{{key}}}"
+    
+    return str(value).strip()
 
 def _call_openai(system_msg: str, user_content: str) -> str:
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -1800,6 +1802,15 @@ def generate_prompt_main(state) -> dict:
         What_Not_To_Do=_b(brand, "What_Not_To_Do"),
         goal=goal,
     )
+
+    print("\n" + "=" * 60)
+    print("PROMPT MAIN - SYSTEM_GOAL:")
+    print("=" * 60)
+    print(system_msg)
+    print("\n" + "=" * 60)
+    print("PROMPT MAIN - USER_GOAL:")
+    print("=" * 60)
+    print(user_content)
 
     prompt = _call_openai(system_msg, user_content)
 
@@ -2036,6 +2047,15 @@ Rules:
         goal=goal,
     )
 
+    print("\n" + "=" * 60)
+    print("PROMPT METADATA - SYSTEM_GOAL:")
+    print("=" * 60)
+    print(system_msg)
+    print("\n" + "=" * 60)
+    print("PROMPT METADATA - USER_GOAL:")
+    print("=" * 60)
+    print(user_content)
+
     prompt = _call_openai_visual(system_msg, user_content)
 
     print(f"====================Metadata prompt========================{prompt}")
@@ -2163,6 +2183,15 @@ def generate_prompt_strategy(state) -> dict:
         goal=goal,
     )
 
+    print("\n" + "=" * 60)
+    print("PROMPT STRATEGY - SYSTEM_GOAL:")
+    print("=" * 60)
+    print(system_msg)
+    print("\n" + "=" * 60)
+    print("PROMPT STRATEGY - USER_GOAL:")
+    print("=" * 60)
+    print(user_content)
+
     prompt = _call_openai(system_msg, user_content)
  
     print(f"===========================strategy prompt===================={prompt}")
@@ -2278,6 +2307,15 @@ def generate_prompt_brand(state) -> dict:
         What_Not_To_Do=_b(brand, "What_Not_To_Do"),
         goal=goal,
     )
+
+    print("\n" + "=" * 60)
+    print("PROMPT BRAND - SYSTEM_GOAL:")
+    print("=" * 60)
+    print(system_msg)
+    print("\n" + "=" * 60)
+    print("PROMPT BRAND - USER_GOAL:")
+    print("=" * 60)
+    print(user_content)
 
     prompt = _call_openai(system_msg, user_content)
 
@@ -3435,6 +3473,7 @@ workflow.add_edge(
     "merge_prompts",
 )
 workflow.add_edge("merge_prompts", "generate_blog")
+# workflow.add_edge("generate_blog", END)
 workflow.add_edge("generate_blog", "generate_image")
 workflow.add_edge("generate_image", "image_feedback")
 
@@ -3555,23 +3594,106 @@ result = app.invoke(
         Rules: Do not guess. If not present, return MISSING. Focus on what makes the visual unique.
         """,
         "question_strategy": """
-            Return the brand context in a detailed paragraph format for marketing content creation.
-    
-            Include:
-            - brand identity and positioning
-            - brand tone and voice
-            - brand personality traits
-            - target audience persona (including behaviors, motivations, and pain points)
-            - communication style and content approach
-            - messaging themes and strategic focus
-            - visual identity and design consistency
-            - platform-specific content behavior (Instagram, LinkedIn, YouTube)
-            - brand guidelines and guardrails (including compliance if any)
-            - marketing and content objectives
-    
-            Write it as a same as points ( bullet points, not JSON).
-            Only use information from the document. Do not hallucinate. If something is missing, skip it. give as same the keywords
-            """,
+        You are extracting complete brand strategy and guidelines from the provided content.
+ 
+        Return the output in structured bullet points.
+ 
+        ----------------------------------------
+        SECTION 1: BRAND CORE (Internal Identity)
+        ----------------------------------------
+        Extract ONLY if explicitly present:
+ 
+        - Brand Name
+        - Brand Description
+        - Brand Mission
+        - Brand Vision
+        - Brand Value Proposition
+        - Key Differentiator
+        - Market Position
+ 
+        - Brand Tone Attributes
+        - Primary Emotion
+        - Secondary Emotion
+        - Avoided Emotion
+        - Sentence Style / Length (if mentioned)
+ 
+        ----------------------------------------
+        SECTION 2: AUDIENCE & PERSONA
+        ----------------------------------------
+ 
+        - Target Audience (who they are)
+        - Persona (traits, behavior)
+        - Goals
+        - Motivations
+        - Pain Points
+        - Content Complexity (if mentioned)
+ 
+        Rules:
+        - Do NOT generalize audience
+        - Do NOT merge multiple segments
+ 
+        ----------------------------------------
+        SECTION 3: BRAND EXPRESSION & DESIGN
+        ----------------------------------------
+ 
+        - Typography (ONLY if explicitly present, else skip)
+        - Color Palette (ONLY if explicitly present)
+        - Visual Identity and Design Consistency
+        - Visual Themes (charts, icons, etc.)
+ 
+        ----------------------------------------
+        SECTION 4: CONTENT & COMMUNICATION STRATEGY
+        ----------------------------------------
+ 
+        - Communication Style and Content Approach
+        - Messaging Themes and Strategic Focus
+        - Content Formats Used (reels, webinars, etc.)
+        - Platform-Specific Behavior:
+        - Instagram
+        - LinkedIn
+        - YouTube
+ 
+        - Social Media Challenges (if mentioned)
+        - Strategy (overall content/marketing direction)
+ 
+        ----------------------------------------
+        SECTION 5: BRAND RULES & LANGUAGE SYSTEM
+        ----------------------------------------
+ 
+        - Do’s (behavioral rules)
+        - Don’ts
+        - Positive Word Bank
+        - Negative Word Bank
+        - Replaceable Words (if mentioned)
+ 
+        ----------------------------------------
+        SECTION 6: BUSINESS & MARKET CONTEXT
+        ----------------------------------------
+ 
+        - Business Problem or Opportunity
+        - Competitive Landscape (ONLY if tied to brand)
+        - Competitor Brands (if mentioned)
+        - Compliance / Regulatory Constraints
+ 
+        ----------------------------------------
+        SECTION 7: OBJECTIVES & GROWTH
+        ----------------------------------------
+ 
+        - Marketing and Content Objectives
+        - Growth Opportunities or Strategic Directions
+ 
+        ----------------------------------------
+        STRICT RULES:
+ 
+        - Use ONLY information explicitly present in the content
+        - Do NOT infer, assume, or generalize
+        - Do NOT mix multiple brands
+        - Preserve exact meaning (no polishing or improving)
+        - Avoid generic words like “engaging”, “innovative”
+        - If a field is not present, SKIP it (do NOT invent)
+        - Keep output as concise bullet points
+        - Only use information from the document. Do not hallucinate. If something is missing, skip it. give as same the keywords
+        """,
         "question_brand": """
         Build {Brand_Name} brand guardrails STRICTLY from the provided {Brand_Name} assets. Do not use external knowledge. If any item is not explicitly supported by the assets, write MISSING (do not hallucinate).
 
