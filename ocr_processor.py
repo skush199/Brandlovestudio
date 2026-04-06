@@ -1031,19 +1031,19 @@ class GoogleVisionOCRProcessor:
 
                 print(f"🖼 Saved image: {img_path}")
                 print(f"📄 PDF Size: {pdf_width} x {pdf_height}")
-                print(f"🖼 Image Size: {img_width} x {img_height} before resize")
+                # print(f"🖼 Image Size: {img_width} x {img_height} before resize")
 
-                max_size = 2000
-                if img_width > max_size or img_height > max_size:
-                    ratio = min(max_size / img_width, max_size / img_height)
-                    new_width = int(img_width * ratio)
-                    new_height = int(img_height * ratio)
-                    pil_image = pil_image.resize(
-                        (new_width, new_height), Image.Resampling.LANCZOS
-                    )
-                    img_width, img_height = pil_image.size
-                    pil_image.save(img_path)
-                    print(f"🖼 Resized to: {img_width} x {img_height}")
+                # max_size = 2000
+                # if img_width > max_size or img_height > max_size:
+                #     ratio = min(max_size / img_width, max_size / img_height)
+                #     new_width = int(img_width * ratio)
+                #     new_height = int(img_height * ratio)
+                #     pil_image = pil_image.resize(
+                #         (new_width, new_height), Image.Resampling.LANCZOS
+                #     )
+                #     img_width, img_height = pil_image.size
+                #     pil_image.save(img_path)
+                #     print(f"🖼 Resized to: {img_width} x {img_height}")
 
                 img_bytes = io.BytesIO()
                 pil_image.save(img_bytes, format="PNG")
