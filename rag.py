@@ -246,6 +246,8 @@ class GraphState(TypedDict):
     goal: Annotated[str, lambda x, y: y]
     image_model: Annotated[str, lambda x, y: y]
     brand_data: Annotated[Dict, dict_merge]
+    image_prompt: Annotated[str, lambda x, y: y]
+    image_spec: Annotated[Dict, dict_merge]
     # --- intermediate prompt outputs (parallel nodes write these) ---
     prompt_main: Annotated[str, lambda x, y: y]
     prompt_metadata: Annotated[str, lambda x, y: y]
@@ -1734,9 +1736,65 @@ def generate_prompt_main(state) -> dict:
     10. Do not invent unsupported claims.
     11. Do not generate the final image prompt.
     12. If any field is unavailable, return exactly: "MISSING".
+    13. IMAGE GENERATION RULE:
+    You may generate images using image-related tools, but outputs must strictly follow the grounded content rules.
+    Visual elements (flags, country names, bars, scales) must exactly match the retrieved content.
+    Do not substitute, alter, or randomize visuals. If information is missing, return "MISSING".
+    14. STRICT GROUNDING RULE:
+    You MUST generate all outputs strictly from the provided "RETRIEVED MAIN CONTENT" and "BRAND CONTEXT". 
+    If a piece of information is not explicitly present or clearly inferable from these inputs, you MUST NOT generate it.
+    15. NO HALLUCINATION RULE:
+    You are strictly forbidden from:
+    - inventing facts
+    - adding assumptions
+    - using general knowledge outside the provided content
+    - filling gaps with likely-sounding marketing language
+
+    If unsure, return "MISSING" instead of guessing.
+
+    16. EVIDENCE ALIGNMENT RULE:
+    Each output section must be directly supported by the retrieved content.
+    Do not introduce any statement that cannot be traced back to the input.
+
+    17. NO GENERIC MARKETING LANGUAGE:
+    Avoid vague or generic phrases such as:
+    "innovative solution", "cutting-edge", "best in class", "world-class", unless explicitly present in retrieved content.
+
+    18. NO CROSS-DOMAIN CONTAMINATION:
+    Do not mix unrelated domains or topics.
+    If retrieved content includes multiple themes, only select the parts that are directly relevant to the goal: {goal}.
+
+    19. STRICT CONTEXT BOUNDARY:
+    Do NOT use prior knowledge, training data, or assumptions about the brand, industry, or domain.
+    Only use what is explicitly provided in the input.
+
+    20. FAILURE MODE (MANDATORY):
+    If any section cannot be confidently generated from the retrieved content:
+    → return exactly: "MISSING"
+    → do NOT approximate or fabricate.
+    21.DETERMINISM RULE:
+    Outputs must remain consistent across runs. The same input must always produce the same visual representation.
+    Do not introduce random variations in flags, symbols, or country representations.
+    22. Content direction must remain layout-safe for poster generation; do not imply excessive headline length, excessive body copy, or overloaded chart content that would likely force clipping.
+
+    23. CONSISTENCY CHECK:
+    Before finalizing output, internally verify:
+    - All sections align with {Primary_Emotion}
+    - No section violates {Avoided_Emotion}
+    - No section contradicts {What_Not_To_Do}
+
+    24. NO CONTENT EXPANSION:
+    Do not elaborate beyond what is supported.
+    Keep outputs tightly grounded and minimal.
+
+    25. PRIORITY ORDER:
+    When conflicts exist:
+    1. Brand Context (highest priority)
+    2. Retrieved Content
+    3. Goal
+    Never override brand rules using retrieved content.  
     
     Your output must strictly follow this exact structure:
-    
     1. Primary Campaign Theme
     2. Core Audience Message
     3. Headline Direction
@@ -1858,11 +1916,43 @@ Non-negotiable rules:
 3. Preserve role-based text color hierarchy from the samples.
 4. Preserve role-based layout hierarchy from the samples.
 5. Focus on relative layout zones, not exact pixels.
-6. Preserve the same reading flow and same visual balance as the samples.
-7. Preserve the same side dominance if evident (for example: text-left / subject-right).
+6. Preserve the same reading flow and same visual balance as the samples, but always convert the layout into a fully in-frame production-safe composition.
+7. Preserve the same side dominance if evident (for example: text-left / subject-right), but do not preserve any edge-tight placement that risks clipping.
 8. Preserve safe empty areas for text if the samples imply them.
 9. Do NOT output explanations.
 10. If unclear, return MISSING rather than guessing.
+
+11. Keep every visible element fully inside the canvas.
+12. Do NOT let headline, subheadline, body text, CTA, logo, footer, chart, graph, axis label, number, legend, icon, or subject touch or cross any image edge.
+13. Maintain safe padding on the top, bottom, left, and right sides.
+14. Keep extra top margin for large headlines.
+15. Keep extra bottom margin for footer, CTA, and chart labels.
+16. Keep enough side margin so long text lines and chart labels remain fully visible.
+17. Do NOT crop the main subject.
+18. Do NOT crop charts, bars, labels, legends, or numeric values.
+19. Do NOT place oversized text blocks that force clipping.
+20. Do NOT place oversized charts that push labels outside the frame.
+21. Prefer a slightly smaller and safer composition over edge-to-edge placement.
+22. If a layout risks clipping, reduce scale while preserving the same relative hierarchy and reading flow.
+23. Preserve clean separation between text zone, chart zone, subject zone, and empty breathing space.
+24. Keep all important content readable at once without truncation.
+25. Ensure the final composition is balanced, fully visible, and production-safe.
+26. If any placement would cause cutoff, choose the nearest safer in-frame placement while preserving the same relative layout logic.
+27. The entire poster composition must fit fully inside the canvas in a final export-safe frame.
+28. No text block, chart block, CTA block, logo block, footer block, or subject block may begin outside the canvas or extend beyond the canvas.
+29. Treat sample layouts as relative inspiration only, not as permission to preserve risky edge proximity or partial cropping.
+30. If a sampled composition appears tight or partially cropped, normalize it into a fully in-frame production-safe version while preserving the same general layout logic.
+31. Maintain a mandatory safe area on all four sides of the canvas for every important element.
+32. Headline and body text must be wrapped and scaled to remain fully visible inside the text zone.
+33. The main subject must be fully visible from head to torso unless the source explicitly requires another framing.
+34. Do not place the subject so close to the right or left canvas edge that any part of the face, shoulder, arm, or clothing risks cutoff.
+35. Charts and data visualizations must fit entirely within their chart zone with all labels, axis text, legends, and values fully readable.
+36. If multiple elements compete for space, reduce overall element scale before reducing safe margins.
+37. Prefer slightly smaller subject, smaller chart, and shorter line lengths over any edge clipping.
+38. Never preserve a composition that causes left-side headline cutoff, right-side subject cutoff, bottom CTA cutoff, or chart-label truncation.
+39. All zones must be validated as export-safe: text-safe, chart-safe, subject-safe, logo-safe, footer-safe.
+40. The final extracted layout must represent a fully visible poster, not a cropped preview.
+
 
 Return exactly in this structure:
 
@@ -2085,67 +2175,190 @@ def _call_openai_visual(system_msg: str, user_content: str) -> str:
 
 def generate_prompt_strategy(state) -> dict:
     """
-    Generates a DALL-E prompt grounded in STRATEGY documents only.
+    Generates a strategy-only prompt grounded in STRATEGY documents only.
     Result stored in state["prompt_strategy"].
     """
     print("🎨 Running Generate Prompt (STRATEGY) Node...")
-
+ 
     SYSTEM_GOAL = """
     You are a senior brand strategist for {Brand_Name}.
-
-    Your responsibility is to retrieve, interpret, and synthesize a comprehensive communication strategy for a branded marketing poster using ONLY the retrieved strategy knowledge and the brand context provided by the user.
-
+ 
+    Your responsibility is to EXTRACT first and then conservatively SYNTHESIZE a grounded communication strategy for a branded marketing poster using ONLY:
+    1. the retrieved strategy knowledge,
+    2. the explicit brand context provided by the user,
+    3. the campaign goal.
+ 
     You must follow these non-negotiable rules at all times:
-
-    1. Retrieve ALL strategy elements strictly aligned with the brand context above.
-    2. Every output field MUST reflect the emotion: {Primary_Emotion} in strategic framing and communication direction.
-    3. NEVER include content that triggers the emotion: {Avoided_Emotion}.
-    4. All retrieved content MUST serve the goal: {goal} and align with the mission: {Brand_Mission}.
-    5. Apply {What_To_Do} as behavioral and communication guardrails.
-    6. Apply {What_Not_To_Do} as hard strategic restrictions.
-    7. Focus only on communication strategy, positioning, audience insight, persuasion, and CTA direction.
-    8. Do not generate design, layout, or color guidance.
-    9. Do not generate the final image prompt.
-    10. Do not invent unsupported strategy.
-    11. If any field is unavailable, return exactly: "MISSING".
-
-    Your output must strictly follow this exact structure:
-
-    1. Target Audience Interpretation
-    2. Persona Motivation
-    3. Persona Pain Points
-    4. Persona Goals
-    5. Strategic Communication Angle
-    6. Core Positioning Angle
-    7. Key Differentiators To Highlight
-    8. Core Value Proposition
-    9. Emotional Persuasion Direction
-    10. CTA Strategy
-    11. Trust / Aspiration / Urgency / Education Balance
-    12. What Strategic Themes Must Be Emphasized
-    13. What Strategic Themes Must Be Avoided
+ 
+    =========================
+    ANTI-HALLUCINATION RULES
+    =========================
+    1. Use ONLY the retrieved strategy context and the explicit brand context provided in the input.
+    2. Do NOT invent, assume, guess, embellish, generalize, or fill missing gaps with common branding knowledge.
+    3. Do NOT use industry norms, generic marketing logic, or assumed customer psychology unless explicitly supported by the retrieved strategy context or explicit brand context.
+    4. If a point is not clearly supported by the retrieved strategy context or explicit brand context, return exactly: MISSING
+    5. If evidence is weak, vague, partial, indirect, or ambiguous, return exactly: MISSING
+    6. If a section is only partially supported, write only the supported portion and do NOT complete the rest by assumption.
+    7. Do NOT create hidden audience motivations, hidden customer psychology, hidden pain points, hidden positioning, hidden differentiators, or hidden business goals unless they are clearly supported.
+    8. Do NOT convert broad mission, vision, or promise statements into detailed strategy unless that connection is explicitly supported.
+    9. Conservative synthesis only:
+       - You may combine multiple supported facts into one strategic summary
+       - You may NOT add new meaning that is absent from the source inputs
+    10. Accuracy is more important than completeness.
+    11. When in doubt, write MISSING.
+ 
+    =========================
+    STRATEGY SCOPE RULES
+    =========================
+    12. Focus ONLY on strategy, messaging direction, positioning, audience alignment, persuasion logic, trust-building, differentiation, and CTA direction.
+    13. Do NOT generate design guidance.
+    14. Do NOT generate layout guidance.
+    15. Do NOT generate color guidance.
+    16. Do NOT generate typography guidance.
+    17. Do NOT generate visual composition guidance.
+    18. Do NOT generate the final image prompt.
+    19. Do NOT write ad copy, slogans, taglines, or headlines unless they are explicitly present in the retrieved strategy context.
+ 
+    =========================
+    MANDATORY BRAND STRATEGY ENFORCEMENT
+    =========================
+    Every valid output must remain aligned with the brand strategy whenever evidence exists for it:
+    - Clear Brand Purpose
+    - Defined Target Audience
+    - Strong Brand Positioning
+    - Consistent Brand Messaging
+    - Brand Identity (strategy-level only; visual/verbal intent only if explicitly supported)
+    - Brand Values and Principles
+    - Competitive Differentiation
+    - Customer Experience Strategy
+    - Long-Term Consistency
+    - Measurable Goals and Performance
+ 
+    =========================
+    MANDATORY BRAND PERSONA ENFORCEMENT
+    =========================
+    Every valid output must remain aligned with the brand persona whenever evidence exists for it:
+    - Personality
+    - Tone of Voice
+    - Values
+    - Behavior
+    - Style (communication style only unless strategy explicitly defines visual style)
+ 
+    =========================
+    MANDATORY BRAND GUARDRAILS ENFORCEMENT
+    =========================
+    Every valid output must remain aligned with brand guardrails whenever evidence exists for it:
+    - Visual Identity Guidelines (mention only at strategy level if explicitly relevant; do not generate visual execution instructions)
+    - Tone of Voice and Communication Style
+    - Messaging Framework
+    - Brand Values and Principles
+    - Content Guidelines
+    - Do’s and Don’ts
+    - Audience Alignment
+    - Cross-Platform Consistency
+ 
+    =========================
+    EMOTION, VALUES, AND RESTRICTION RULES
+    =========================
+    20. Every output field MUST reflect the emotion: {Primary_Emotion} only if that is clearly supported by the brand context or retrieved strategy context.
+    21. NEVER include content, framing, language, or strategic direction that triggers the emotion: {Avoided_Emotion}.
+    22. Do NOT translate emotion into exaggerated messaging unless the source context supports it.
+    23. All valid retrieved content MUST serve the goal: {goal} and align with the mission: {Brand_Mission}, vision: {Brand_Vision}, and promise: {Brand_Promise}, but only where explicitly supported.
+    24. Apply {What_To_Do} as behavioral and communication guardrails.
+    25. Apply {What_Not_To_Do} as hard strategic restrictions.
+ 
+    =========================
+    CONFLICT RESOLUTION RULES
+    =========================
+    26. If there is conflict, follow this priority:
+        a. Retrieved strategy context
+        b. Explicit brand context
+        c. Campaign goal
+    27. Never resolve conflict by inventing a compromise.
+    28. If conflict cannot be resolved from evidence, return: MISSING
+ 
+    =========================
+    OUTPUT STYLE RULES
+    =========================
+    29. Be precise, concise, and strategy-focused.
+    30. No fluff.
+    31. No vague consulting language.
+    32. No unsupported marketing claims.
+    33. No extra sections.
+    34. Do not explain your reasoning.
+    35. Keep each section short: 1 to 3 sentences maximum.
+    36. Use wording close to the source material whenever possible.
+    37. Follow the exact output structure below.
+    38. For each section, provide only grounded strategy.
+    39. If unsupported, write exactly: MISSING
+ 
+    Your output must strictly follow this exact structure and labeling format:
+ 
+    1. Brand Purpose Relevance: <content or MISSING>
+    2. Target Audience Interpretation: <content or MISSING>
+    3. Persona Motivation: <content or MISSING>
+    4. Persona Pain Points: <content or MISSING>
+    5. Persona Goals: <content or MISSING>
+    6. Strategic Communication Angle: <content or MISSING>
+    7. Core Positioning Angle: <content or MISSING>
+    8. Core Brand Message: <content or MISSING>
+    9. Key Differentiators To Highlight: <content or MISSING>
+    10. Core Value Proposition: <content or MISSING>
+    11. Emotional Persuasion Direction: <content or MISSING>
+    12. CTA Strategy: <content or MISSING>
+    13. Trust / Aspiration / Urgency / Education Balance: <content or MISSING>
+    14. Brand Values And Principles To Reflect: <content or MISSING>
+    15. Tone Of Voice Direction: <content or MISSING>
+    16. Communication Style Direction: <content or MISSING>
+    17. Customer Experience Strategy Relevance: <content or MISSING>
+    18. Strategic Themes Must Be Emphasized: <content or MISSING>
+    19. Strategic Themes Must Be Avoided: <content or MISSING>
+    20. Guardrails To Enforce In Messaging: <content or MISSING>
+    21. Cross-Platform Consistency Notes: <content or MISSING>
+    22. Long-Term Consistency Notes: <content or MISSING>
+    23. Measurable Goals / Performance Direction: <content or MISSING>
     """
-
+ 
     USER_GOAL = """
     ## BRAND CONTEXT
-
-    {Brand_Name} is a brand operating with the mission of {Brand_Mission} and a long-term vision of {Brand_Vision}. The brand promises its customers {Brand_Promise} and is positioned in the market as {Market_Positioning}, standing apart through its key differentiators: {Key_Differentiators}. The brand primarily serves a {Audience_Type} audience, with the persona playing the role of {Persona_Role}, driven by goals such as {Persona_Goals} and facing pain points including {Fear_And_Pain_Points}. The current strategic goal guiding this retrieval is {goal}. In all communications, the brand must lead with the emotion of {Primary_Emotion} and must strictly avoid evoking {Avoided_Emotion}. The brand always follows these behavioral principles — {What_To_Do} — and must never engage in the following — {What_Not_To_Do}.
-
+ 
+    {Brand_Name} is a brand operating with the mission of {Brand_Mission} and a long-term vision of {Brand_Vision}. The brand promises its customers {Brand_Promise} and is positioned in the market as {Market_Positioning}, standing apart through its key differentiators: {Key_Differentiators}. The brand primarily serves a {Audience_Type} audience, with the persona playing the role of {Persona_Role}, driven by goals such as {Persona_Goals} and facing pain points including {Fear_And_Pain_Points}. The current strategic goal guiding this retrieval is {goal}. In all communications, the brand should reflect the emotion {Primary_Emotion} and must avoid evoking {Avoided_Emotion}. The brand follows these principles: {What_To_Do}. The brand must never do the following: {What_Not_To_Do}.
+ 
     ## RETRIEVED STRATEGY CONTEXT
-
+ 
     {retrieved_strategy}
-
+ 
     ## TASK
-
-    Using only the retrieved strategy context and the brand context above, extract and synthesize the communication strategy for the poster.
+ 
+    Using ONLY the retrieved strategy context and the explicit brand context above, extract and conservatively synthesize the communication strategy for the poster.
+ 
+    The output must:
+    - stay faithful to the retrieved strategy
+    - preserve mandatory brand strategy alignment
+    - preserve brand persona
+    - preserve brand guardrails
+    - stay aligned with the campaign goal
+    - avoid unsupported assumptions
+    - return MISSING wherever evidence is absent
+    - avoid expanding weak evidence into full strategy
+ 
+    Important:
+    - If both retrieved strategy context and explicit brand context support a point, combine them conservatively
+    - If only one source supports a point, use only that support
+    - If neither source clearly supports a point, return MISSING
+    - Do NOT generate design directions
+    - Do NOT generate layout directions
+    - Do NOT generate color directions
+    - Do NOT generate typography directions
+    - Do NOT generate final image prompt content
+    - Do NOT invent unsupported strategy
     """
-    # OUTPUT_FORMAT variable removed — structure is already specified in SYSTEM_GOAL above.
-
+ 
     brand = state.get("brand_data", {})
     goal = state.get("goal", "")
-
+ 
     retrieved_strategy = _flatten(state.get("retrieved_docs_strategy", []))
-
+ 
     system_msg = SYSTEM_GOAL.format(
         Brand_Name=_b(brand, "Brand_Name"),
         Brand_Mission=_b(brand, "Brand_Mission"),
@@ -2163,7 +2376,7 @@ def generate_prompt_strategy(state) -> dict:
         What_Not_To_Do=_b(brand, "What_Not_To_Do"),
         goal=goal,
     )
-
+ 
     user_content = USER_GOAL.format(
         retrieved_strategy=retrieved_strategy,
         Brand_Name=_b(brand, "Brand_Name"),
@@ -2182,7 +2395,7 @@ def generate_prompt_strategy(state) -> dict:
         What_Not_To_Do=_b(brand, "What_Not_To_Do"),
         goal=goal,
     )
-
+ 
     print("\n" + "=" * 60)
     print("PROMPT STRATEGY - SYSTEM_GOAL:")
     print("=" * 60)
@@ -2191,14 +2404,12 @@ def generate_prompt_strategy(state) -> dict:
     print("PROMPT STRATEGY - USER_GOAL:")
     print("=" * 60)
     print(user_content)
-
+ 
     prompt = _call_openai(system_msg, user_content)
  
     print(f"===========================strategy prompt===================={prompt}")
-
-    # Return ONLY the key this node writes — avoids concurrent-write conflict in fan-out
+ 
     return {"prompt_strategy": prompt}
-
 
 # ---------------------------------------------------------------------------
 # 4. generate_prompt_brand
@@ -2206,124 +2417,409 @@ def generate_prompt_strategy(state) -> dict:
 
 
 def generate_prompt_brand(state) -> dict:
+
     print("🎨 Running Generate Prompt (BRAND) Node...")
-
+ 
     SYSTEM_GOAL = """
+
     You are a senior brand identity strategist for {Brand_Name}.
+ 
+    Your responsibility is to EXTRACT first and then conservatively SYNTHESIZE the brand identity rules that are safe to use for downstream poster / image generation using ONLY:
 
-    Your responsibility is to retrieve, interpret, and synthesize the brand identity rules required for safe and consistent poster generation using ONLY the retrieved brand knowledge and the brand context provided by the user.
+    1. the retrieved brand knowledge,
 
+    2. the explicit brand context provided by the user,
+
+    3. the campaign goal.
+ 
+    This node does NOT generate the final image prompt.
+
+    This node generates only brand control guidance for a later image-generation step.
+ 
     You must follow these non-negotiable rules at all times:
+ 
+    =========================
 
-    1. Retrieve and synthesize ONLY the brand identity guidance aligned with the brand context above.
-    2. Every output field MUST reflect the emotion: {Primary_Emotion} in tone, style, and identity expression.
-    3. NEVER include identity or style directions that trigger {Avoided_Emotion}.
-    4. All retrieved content MUST serve the goal: {goal} and align with the mission: {Brand_Mission}, vision: {Brand_Vision}, and promise: {Brand_Promise}.
-    5. Apply {What_To_Do} as brand governance rules.
-    6. Apply {What_Not_To_Do} as hard brand restrictions.
-    7. Focus on brand identity, personality, tone, style guardrails, and forbidden style directions.
-    8. Do not generate campaign strategy unless explicitly supported.
-    9. Do not invent unsupported brand attributes.
-    10. Do not generate the final image prompt.
-    11. If any field is unavailable, return exactly: "MISSING".
+    ANTI-HALLUCINATION RULES
 
-    Your output must strictly follow this exact structure:
+    =========================
 
-        1. Brand Personality
-        2. Brand Tone of Voice
-        3. Brand Emotional Direction
-        4. Brand Promise Expression
-        5. Market Positioning Expression
-        6. Key Differentiators To Emphasize
-        7. Audience Impression The Brand Should Create
-        8. Visual Identity Cues
-        9. Typography Guidance
-        10. Brand-Safe Style Keywords
-        11. Layout System Rules
-        12. Logo Placement / Safe Area Rules
-        13. CTA Placement Preference
-        14. Footer Structure Rules
-        15. Grid / Alignment / Whitespace Rules
-        16. What The Brand Must Always Communicate
-        17. What The Brand Must Never Communicate
-        18. What To Do
-        19. What Not To Doo
+    1. Use ONLY the retrieved brand knowledge and the explicit brand context provided in the input.
+
+    2. Do NOT invent, assume, infer, guess, embellish, generalize, or fill missing gaps with general brand, marketing, or design knowledge.
+
+    3. If any point is not clearly supported by the retrieved brand knowledge or explicit brand context, return exactly: MISSING
+
+    4. If evidence is weak, vague, partial, one-off, indirect, ambiguous, or conflicting, return exactly: MISSING
+
+    5. If a section is only partially supported, write only the supported part and do NOT complete the rest by assumption.
+
+    6. Do NOT create new brand attributes, new emotional traits, new messaging themes, new visual motifs, new style signals, or new identity rules that are not present in the source inputs.
+
+    7. Do NOT merge weak or scattered evidence into a fixed brand rule.
+
+    8. Do NOT convert ambiguous evidence into confident guidance.
+
+    9. Conservative synthesis only:
+
+       - you may combine multiple supported facts into one concise brand rule
+
+       - you may NOT add new meaning that is absent from the source inputs
+
+    10. Accuracy is more important than completeness.
+
+    11. When in doubt, write MISSING.
+ 
+    =========================
+
+    BRAND SCOPE RULES
+
+    =========================
+
+    12. Focus ONLY on brand identity, personality, tone, communication style, visual identity cues, typography intent, brand-safe style guardrails, and safe layout/logo/CTA/footer preferences when explicitly supported.
+
+    13. Do NOT generate campaign strategy unless explicitly supported by the retrieved brand knowledge.
+
+    14. Do NOT generate audience strategy, persuasion strategy, or positioning strategy unless explicitly supported by the retrieved brand knowledge.
+
+    15. Do NOT generate the final image prompt.
+
+    16. Do NOT write slogans, taglines, CTA text, footer text, or marketing copy unless exact wording or clear wording direction is explicitly supported.
+
+    17. Do NOT introduce new icons, motifs, props, scenes, visual devices, or decorative ideas that are not supported by the source inputs.
+
+    18. Do NOT beautify, optimize, modernize, reinterpret, or improve the brand guidance beyond what is supported.
+ 
+    =========================
+
+    IMAGE-GENERATION SAFETY RULES
+
+    =========================
+
+    19. Because this output will be used later for image generation, prefer enforceable, visually controllable rules over abstract or decorative language.
+
+    20. Do NOT guess exact font names, exact font sizes, exact font weights, exact spacing values, exact safe-area dimensions, exact margins, exact grid units, or exact placement coordinates unless explicitly supported.
+
+    21. Do NOT generate hidden layout systems, hidden spacing systems, hidden grid logic, hidden visual hierarchy rules, hidden alignment rules, or hidden logo lockup rules unless explicitly supported.
+
+    22. Preserve only relative guidance that is clearly supported, such as:
+
+        - left / right / centered
+
+        - top / bottom
+
+        - text-heavy / image-heavy
+
+        - open space / compact layout
+
+        - minimal / bold / premium / restrained
+
+        - strong alignment / soft asymmetry
+
+      If even relative guidance is unsupported, return MISSING.
+
+    23. If any layout rule, typography rule, logo rule, CTA rule, footer rule, whitespace rule, or style cue is not explicitly supported, return exactly: MISSING
+
+    24. Do NOT require dense microtext, disclaimers, complex footer copy, or precise text lockups unless explicitly supported.
+
+    25. For Visual Identity Cues and Brand-Safe Style Keywords, stay close to source wording whenever possible. Do NOT generate generic aesthetic buzzwords unless they are explicitly present or directly supported.
+ 
+    =========================
+
+    MANDATORY BRAND PERSONA ENFORCEMENT
+
+    =========================
+
+    Every valid output must remain aligned with the brand persona whenever evidence exists for it:
+
+    - Personality
+
+    - Tone of Voice
+
+    - Values
+
+    - Behavior
+
+    - Style
+ 
+    =========================
+
+    MANDATORY BRAND GUARDRAILS ENFORCEMENT
+
+    =========================
+
+    Every valid output must remain aligned with brand guardrails whenever evidence exists for it:
+
+    - Visual Identity Guidelines
+
+    - Tone of Voice and Communication Style
+
+    - Messaging Framework
+
+    - Brand Values and Principles
+
+    - Content Guidelines
+
+    - Do’s and Don’ts
+
+    - Audience Alignment
+
+    - Cross-Platform Consistency
+ 
+    =========================
+
+    EMOTION, VALUES, AND RESTRICTION RULES
+
+    =========================
+
+    26. Every output field MUST reflect the emotion: {Primary_Emotion} only if that is clearly supported by the brand context or retrieved brand knowledge.
+
+    27. NEVER include identity, tone, style, or visual directions that trigger the emotion: {Avoided_Emotion}.
+
+    28. All valid retrieved content MUST serve the goal: {goal} and align with the mission: {Brand_Mission}, vision: {Brand_Vision}, and promise: {Brand_Promise}, but only where explicitly supported.
+
+    29. Apply {What_To_Do} as brand governance rules.
+
+    30. Apply {What_Not_To_Do} as hard brand restrictions.
+ 
+    =========================
+
+    CONFLICT RESOLUTION RULES
+
+    =========================
+
+    31. If there is conflict, follow this priority:
+
+        a. Retrieved brand knowledge
+
+        b. Explicit brand context
+
+        c. Campaign goal
+
+    32. Never resolve conflict by inventing a compromise.
+
+    33. If conflict cannot be resolved from evidence, return exactly: MISSING
+ 
+    =========================
+
+    OUTPUT STYLE RULES
+
+    =========================
+
+    34. Be precise, concise, and brand-rule focused.
+
+    35. No fluff.
+
+    36. No vague design jargon.
+
+    37. No unsupported claims.
+
+    38. No extra sections.
+
+    39. Do not explain your reasoning.
+
+    40. Keep each section short: 1 to 3 sentences maximum.
+
+    41. Use wording close to the source material whenever possible.
+
+    42. Follow the exact output structure and labeling format below.
+
+    43. For each section, provide only grounded rules or guidance.
+
+    44. If unsupported, write exactly: MISSING
+ 
+    Your output must strictly follow this exact structure and labeling format:
+ 
+    1. Brand Personality: <content or MISSING>
+
+    2. Brand Tone Of Voice: <content or MISSING>
+
+    3. Brand Emotional Direction: <content or MISSING>
+
+    4. Brand Promise Expression: <content or MISSING>
+
+    5. Market Positioning Expression: <content or MISSING>
+
+    6. Key Differentiators To Emphasize: <content or MISSING>
+
+    7. Audience Impression The Brand Should Create: <content or MISSING>
+
+    8. Visual Identity Cues: <content or MISSING>
+
+    9. Typography Guidance: <content or MISSING>
+
+    10. Brand-Safe Style Keywords: <content or MISSING>
+
+    11. Layout System Rules: <content or MISSING>
+
+    12. Logo Placement / Safe Area Rules: <content or MISSING>
+
+    13. CTA Placement Preference: <content or MISSING>
+
+    14. Footer Structure Rules: <content or MISSING>
+
+    15. Grid / Alignment / Whitespace Rules: <content or MISSING>
+
+    16. What The Brand Must Always Communicate: <content or MISSING>
+
+    17. What The Brand Must Never Communicate: <content or MISSING>
+
+    18. What To Do: <content or MISSING>
+
+    19. What Not To Do: <content or MISSING>
+
     """
-
+ 
     USER_GOAL = """
+
     ## BRAND CONTEXT
-
-    {Brand_Name} is a brand operating with the mission of {Brand_Mission} and a long-term vision of {Brand_Vision}. The brand promises its customers {Brand_Promise} and is positioned in the market as {Market_Positioning}, standing apart through its key differentiators: {Key_Differentiators}. The brand primarily serves a {Audience_Type} audience, with the persona playing the role of {Persona_Role}, driven by goals such as {Persona_Goals} and facing pain points including {Fear_And_Pain_Points}. The current strategic goal guiding this retrieval is {goal}. In all communications, the brand must lead with the emotion of {Primary_Emotion} and must strictly avoid evoking {Avoided_Emotion}. The brand always follows these behavioral principles — {What_To_Do} — and must never engage in the following — {What_Not_To_Do}.
-
+ 
+    {Brand_Name} is a brand operating with the mission of {Brand_Mission} and a long-term vision of {Brand_Vision}. The brand promises its customers {Brand_Promise} and is positioned in the market as {Market_Positioning}, standing apart through its key differentiators: {Key_Differentiators}. The brand primarily serves a {Audience_Type} audience, with the persona playing the role of {Persona_Role}, driven by goals such as {Persona_Goals}, and facing pain points including {Fear_And_Pain_Points}. The current strategic goal guiding this retrieval is {goal}. In all communications, the brand must lead with the emotion of {Primary_Emotion} and must strictly avoid evoking {Avoided_Emotion}. The brand always follows these behavioral principles — {What_To_Do} — and must never engage in the following — {What_Not_To_Do}.
+ 
     ## RETRIEVED BRAND CONTEXT
-
+ 
     {retrieved_brand}
-
+ 
     ## TASK
+ 
+    Using ONLY the retrieved brand context and the explicit brand details above, extract and conservatively synthesize the brand identity rules for poster / image generation.
+ 
+    This output will be used later by an image-generation step.
+ 
+    Therefore:
 
-    Using only the retrieved brand context and the brand details above, extract and synthesize the brand identity rules for poster generation.
+    - include only brand rules that are visually enforceable or messaging-critical
+
+    - stay faithful to the retrieved brand knowledge
+
+    - preserve brand persona
+
+    - preserve brand guardrails
+
+    - stay aligned with the campaign goal
+
+    - avoid unsupported assumptions
+
+    - avoid invented visual rules
+
+    - avoid invented typography, grid, spacing, layout, logo, CTA, and footer rules
+
+    - return MISSING wherever evidence is absent
+ 
+    Important:
+
+    - If both retrieved brand knowledge and explicit brand context support a point, combine them conservatively
+
+    - If only one source supports a point, use only that support
+
+    - If neither source clearly supports a point, return MISSING
+
+    - Do NOT generate campaign strategy unless explicitly supported
+
+    - Do NOT generate the final image prompt
+
+    - Do NOT invent unsupported brand rules
+
     """
-
-    # OUTPUT_FORMAT variable removed — structure is already specified in SYSTEM_GOAL above.
+ 
     brand = state.get("brand_data", {})
+
     goal = state.get("goal", "")
-
+ 
     retrieved_brand = _flatten(state.get("retrieved_docs_brand", []))
-
-    # system_msg = SYSTEM_GOAL.format(**brand, goal=goal)
+ 
     system_msg = SYSTEM_GOAL.format(
-        Brand_Name=_b(brand, "Brand_Name"),
-        Brand_Mission=_b(brand, "Brand_Mission"),
-        Brand_Vision=_b(brand, "Brand_Vision"),
-        Brand_Promise=_b(brand, "Brand_Promise"),
-        Market_Positioning=_b(brand, "Market_Positioning"),
-        Key_Differentiators=_b(brand, "Key_Differentiators"),
-        Audience_Type=_b(brand, "Audience_Type"),
-        Persona_Role=_b(brand, "Persona_Role"),
-        Persona_Goals=_b(brand, "Persona_Goals"),
-        Fear_And_Pain_Points=_b(brand, "Fear_And_Pain_Points"),
-        Primary_Emotion=_b(brand, "Primary_Emotion"),
-        Avoided_Emotion=_b(brand, "Avoided_Emotion"),
-        What_To_Do=_b(brand, "What_To_Do"),
-        What_Not_To_Do=_b(brand, "What_Not_To_Do"),
-        goal=goal,
-    )
 
+        Brand_Name=_b(brand, "Brand_Name"),
+
+        Brand_Mission=_b(brand, "Brand_Mission"),
+
+        Brand_Vision=_b(brand, "Brand_Vision"),
+
+        Brand_Promise=_b(brand, "Brand_Promise"),
+
+        Market_Positioning=_b(brand, "Market_Positioning"),
+
+        Key_Differentiators=_b(brand, "Key_Differentiators"),
+
+        Audience_Type=_b(brand, "Audience_Type"),
+
+        Persona_Role=_b(brand, "Persona_Role"),
+
+        Persona_Goals=_b(brand, "Persona_Goals"),
+
+        Fear_And_Pain_Points=_b(brand, "Fear_And_Pain_Points"),
+
+        Primary_Emotion=_b(brand, "Primary_Emotion"),
+
+        Avoided_Emotion=_b(brand, "Avoided_Emotion"),
+
+        What_To_Do=_b(brand, "What_To_Do"),
+
+        What_Not_To_Do=_b(brand, "What_Not_To_Do"),
+
+        goal=goal,
+
+    )
+ 
     user_content = USER_GOAL.format(
+
         retrieved_brand=retrieved_brand,
+
         Brand_Name=_b(brand, "Brand_Name"),
+
         Brand_Mission=_b(brand, "Brand_Mission"),
+
         Brand_Vision=_b(brand, "Brand_Vision"),
+
         Brand_Promise=_b(brand, "Brand_Promise"),
+
         Market_Positioning=_b(brand, "Market_Positioning"),
+
         Key_Differentiators=_b(brand, "Key_Differentiators"),
+
         Audience_Type=_b(brand, "Audience_Type"),
+
         Persona_Role=_b(brand, "Persona_Role"),
+
         Persona_Goals=_b(brand, "Persona_Goals"),
+
         Fear_And_Pain_Points=_b(brand, "Fear_And_Pain_Points"),
+
         Primary_Emotion=_b(brand, "Primary_Emotion"),
+
         Avoided_Emotion=_b(brand, "Avoided_Emotion"),
+
         What_To_Do=_b(brand, "What_To_Do"),
+
         What_Not_To_Do=_b(brand, "What_Not_To_Do"),
+
         goal=goal,
+
     )
+ 
+    print("\\n" + "=" * 60)
 
-    print("\n" + "=" * 60)
     print("PROMPT BRAND - SYSTEM_GOAL:")
+
     print("=" * 60)
+
     print(system_msg)
-    print("\n" + "=" * 60)
+
+    print("\\n" + "=" * 60)
+
     print("PROMPT BRAND - USER_GOAL:")
+
     print("=" * 60)
+
     print(user_content)
-
+ 
     prompt = _call_openai(system_msg, user_content)
-
+ 
     print(f"==========generate brand prompt========={prompt}")
-
-    # Return ONLY the key this node writes — avoids concurrent-write conflict in fan-out
+ 
     return {"prompt_brand": prompt}
-
+ 
 
 # def merge_prompts(state) -> dict:
 #     """Merges the 4 individual prompts into state["prompt"] for generate_image."""
@@ -2631,6 +3127,23 @@ def get_model_output_path(
     filename = f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{ext}"
     return os.path.join(model_dir, filename)
 
+def _clean_text(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    return str(value).strip()
+
+
+def _top_image_descriptions(image_descriptions: dict, top_k: int = 3) -> list[str]:
+    items = []
+    for img_path, desc in (image_descriptions or {}).items():
+        img_name = os.path.basename(img_path)
+        desc = _clean_text(desc)
+        if desc:
+            items.append(f"{img_name}: {desc}")
+    return items[:top_k]
+
 
 # -----------------------------
 # NODE: generate_image
@@ -2689,16 +3202,106 @@ from openai import OpenAI
 #         f"Image generation failed. No b64_json or url returned. Raw: {data0}"
 #     )
 
+def build_image_spec_node(state: GraphState) -> GraphState:
+    print("🧩 Running Build Image Spec Node...")
+
+    goal = _clean_text(state.get("goal", ""))
+    blog_summary = _clean_text(state.get("blog_summary", ""))
+    prompt_main = _clean_text(state.get("prompt_main", ""))
+    prompt_metadata = _clean_text(state.get("prompt_metadata", ""))
+    prompt_strategy = _clean_text(state.get("prompt_strategy", ""))
+    prompt_brand = _clean_text(state.get("prompt_brand", ""))
+    brand_data = state.get("brand_data", {}) or {}
+    image_descriptions = state.get("image_descriptions", {}) or {}
+
+    text_style = ""
+    typography = brand_data.get("Typography", {})
+    if isinstance(typography, dict):
+        text_style = _clean_text(typography.get("Text_style", ""))
+
+    if not text_style and os.path.exists("Jiraaf_data.json"):
+        try:
+            with open("Jiraaf_data.json", "r", encoding="utf-8") as f:
+                jiraaf_data = json.load(f)
+            typography = jiraaf_data.get("Typography", {})
+            if isinstance(typography, dict):
+                text_style = _clean_text(typography.get("Text_style", ""))
+        except Exception as e:
+            print(f"  ⚠️ Error reading Jiraaf_data.json for typography: {e}")
+
+    top_refs = _top_image_descriptions(image_descriptions, top_k=3)
+
+    image_spec = {
+        "goal": goal,
+        "main_message": prompt_main,
+        "visual_rules": prompt_metadata,
+        "strategy_rules": prompt_strategy,
+        "brand_guardrails": prompt_brand,
+        "typography_style": text_style,
+        "visible_copy": blog_summary,
+        "reference_creatives": top_refs,
+    }
+
+    image_prompt = f"""
+Create a photorealistic branded marketing image.
+
+[GOAL]
+{goal}
+
+[MAIN MESSAGE]
+{prompt_main}
+
+[VISUAL RULES]
+{prompt_metadata}
+
+[BRAND GUARDRAILS]
+{prompt_brand}
+
+[COMMUNICATION STRATEGY]
+{prompt_strategy}
+
+[TYPOGRAPHY]
+Use this exact typography style for all visible text:
+{text_style}
+
+[REFERENCE CREATIVE DESCRIPTIONS]
+{chr(10).join(top_refs)}
+
+[VISIBLE COPY]
+{blog_summary}
+
+[FINAL IMAGE RULES]
+- Follow the layout hierarchy and reading flow from the visual rules.
+- Keep all text fully visible and inside safe margins.
+- Use a premium, clean, professional, photorealistic look.
+- Do not use cartoon, anime, vector-art, or unsupported decorative elements.
+- Include only visual elements supported by the reference creative descriptions.
+""".strip()
+
+    with open("image_spec.json", "w", encoding="utf-8") as f:
+        json.dump(image_spec, f, ensure_ascii=False, indent=2)
+
+    with open("image_prompt.txt", "w", encoding="utf-8") as f:
+        f.write(image_prompt)
+
+    print(f"  ✅ Image prompt prepared. Length: {len(image_prompt)}")
+
+    return {
+        "image_spec": image_spec,
+        "image_prompt": image_prompt,
+    }
+
+
 
 def generate_image(state: GraphState) -> GraphState:
     print("🖼 Running Generate Image Node...")
 
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-    base_prompt = (state.get("prompt") or "").strip()
+    base_prompt = (state.get("image_prompt") or state.get("prompt") or "").strip()
     if not base_prompt:
         raise ValueError(
-            "Missing 'prompt' in state. generate_prompt must run before generate_image."
+            "Missing 'image_prompt'/'prompt' in state. build_image_spec_node or generate_prompt must run before generate_image."
         )
 
     brand_data = state.get("brand_data", {})
@@ -3427,6 +4030,7 @@ workflow.add_node("generate_prompt_strategy", generate_prompt_strategy)
 workflow.add_node("generate_prompt_brand", generate_prompt_brand)
 workflow.add_node("merge_prompts", merge_prompts)
 workflow.add_node("generate_blog", generate_blog_node)
+workflow.add_node("build_image_spec", build_image_spec_node)
 workflow.add_node("generate_image", generate_image)
 workflow.add_node("image_feedback", image_feedback)
 workflow.add_node("edit_image", edit_image)
@@ -3474,7 +4078,8 @@ workflow.add_edge(
 )
 workflow.add_edge("merge_prompts", "generate_blog")
 # workflow.add_edge("generate_blog", END)
-workflow.add_edge("generate_blog", "generate_image")
+workflow.add_edge("generate_blog", "build_image_spec")
+workflow.add_edge("build_image_spec", "generate_image")
 workflow.add_edge("generate_image", "image_feedback")
 
 workflow.add_conditional_edges(
