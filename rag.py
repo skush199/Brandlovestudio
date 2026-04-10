@@ -4172,7 +4172,7 @@ result = app.invoke(
         # Format it as a social media carousel slide for Instagram
         # """,
         "goal": """
-        Create a linkedin post with a horizontal bar chart comparing current vs projected quick commerce market sizes across countries.
+        create a post for instagram about breaking bonds.
         """,
         "question": """        
         From the provided brand content, extract:
